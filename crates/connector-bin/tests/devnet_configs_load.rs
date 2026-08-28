@@ -1143,7 +1143,7 @@ async fn deploy_settlement_on_anvil() -> (Anvil, ethers::types::Address, ethers:
 /// value, so they double as the guard that the committed sections keep
 /// naming it; [`every_fleet_configs_settlement_evm_leg_matches_the_live_identity`]
 /// below asserts it directly, as parsed, for both surviving files.
-const FLEET_LIVE_REGISTRY: &str = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1";
+const FLEET_LIVE_REGISTRY: &str = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5";
 
 /// The retired pre-ERC-2771 `TokenNetworkRegistry` [`FLEET_LIVE_REGISTRY`]
 /// replaced -- `docs/evm-deployment.md`'s "Current live deployment
@@ -1733,7 +1733,7 @@ const RELAY_SWAP_CONFIG: &str = include_str!("../../../infra/linode-relay/swap.c
 /// (`packages/contracts/deployments.json`, docs/evm-deployment.md), resolved
 /// from [`FLEET_LIVE_REGISTRY`]. A literal here for the same reason every
 /// other `FLEET_*` address is one.
-const FLEET_LIVE_TOKEN_NETWORK: &str = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478";
+const FLEET_LIVE_TOKEN_NETWORK: &str = "0xe9E05dfecfe165266C88d73e61D483612651952a";
 
 /// The maker holds TWO EVM contract addresses that are easy to read as one
 /// thing and are not:

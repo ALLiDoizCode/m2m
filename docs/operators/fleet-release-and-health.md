@@ -57,6 +57,41 @@ longer lives in this repository.
 for it to check. Do not wire anything to move it — a floating tag moving unsupervised shipped once
 (#990) and was reverted, and there is even less reason to repeat it now.
 
+## Keeping the three pins together
+
+Since [ADR 0068](../adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
+this repository does not deploy the connector. Three node repositories each pin the build they run,
+in one place, guarded by that repo's own bundle test:
+
+| repo          | the pin of record                                    | how a bump reaches the box                                                                   |
+| ------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `relay`       | `deploy/Dockerfile` → `ARG CONNECTOR_TAG`            | the publish workflow rebuilds `relay-connector:release` and Watchtower recreates within ~60s |
+| `store`       | `deploy/docker-compose.yml` → `connector:rust-sha-…` | on the box: `git pull && ./render.sh && docker compose up -d`                                |
+| `gas-station` | `deploy/docker-compose.yml` → `connector:rust-sha-…` | same                                                                                         |
+
+Bump the pin **and** the literal in that repo's guard test in one reviewed commit — the guards exist
+so the two cannot disagree. The pin must be an immutable `rust-sha-` tag: `:rust-release` is retired
+and frozen at `rust-sha-8708caf`, a build on which a runtime peering cannot pay (ADR 0068's update).
+
+Land a config change **before** the build that requires it. The parser is `deny_unknown_fields` and
+startup is fail-closed, so a schema drift under a box is a refuse-to-start rather than a degraded
+run — which is the behaviour you want, and the reason ordering matters.
+
+### The drift check
+
+`.github/workflows/fleet-pin-drift.yml` runs daily and on dispatch. It is read-only, holds no
+credential, and reaches no box: it reads the three pins over plain HTTPS and asks GHCR anonymously
+whether each is pullable. It **fails**, and opens a rolling `needs:human` issue, when a pin cannot
+be parsed, when the three name different builds, when one is a moving tag, or when one cannot be
+pulled. The first green run closes the issue.
+
+Being **behind `main` is only reported, never failed** — a pin lagging is what pinning is. The run
+summary says how far behind, and whether any of those commits touch `crates/*/src`: if none do, the
+shipped binary is unchanged and there is nothing to gain from bumping.
+
+A staged rollout will show as drift while it is in progress. That is correct — it clears when the
+last repo lands.
+
 ## Rolling the faucet back
 
 The faucet is the one box this repo still redeploys directly:

@@ -30,11 +30,18 @@ contract DeployTestnetCutoverForkTest is Test {
     /// @notice The pre-cutover TokenNetwork the old registry resolves EXISTING_USDC to.
     address internal constant OLD_TOKEN_NETWORK = 0x1E95493fEF46707E034b4a1945f25a8C76A1823D;
 
-    /// @notice The CURRENT live (2026-08-06 ERC-2771 cutover) TokenNetwork on Base Sepolia
-    ///         (packages/contracts/deployments/base-sepolia.md). Still the pre-ADR-0059 contract:
-    ///         it carries `channelCounter` and has no `channelEpoch`, which is exactly what
-    ///         testFork_Cutover_LiveDeploymentStillCarriesTheGlobalCounter reads off the fork.
+    /// @notice The 2026-08-06 ERC-2771 cutover's TokenNetwork on Base Sepolia, SUPERSEDED by the
+    ///         2026-08-28 ADR 0059 cutover (packages/contracts/deployments/base-sepolia.md). The
+    ///         pre-ADR-0059 contract: it carries `channelCounter` and has no `channelEpoch`, which
+    ///         is exactly what testFork_Cutover_LiveDeploymentStillCarriesTheGlobalCounter reads
+    ///         off the fork -- it is untouched, and channels opened on it keep settling there.
     address internal constant OLD_2771_TOKEN_NETWORK = 0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478;
+
+    /// @notice The CURRENT live TokenNetwork: this script's own 2026-08-28 broadcast, block
+    ///         46055303. It derives channel ids (`channelEpoch` answers, `channelCounter` is gone),
+    ///         which testFork_Cutover_LiveDeploymentDerivesChannelIds reads off the fork.
+    address internal constant LIVE_TOKEN_NETWORK = 0xe9E05dfecfe165266C88d73e61D483612651952a;
+    address internal constant LIVE_REGISTRY = 0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5;
 
     /// @notice The known-funded devnet USDC distributor (packages/contracts/deployments/
     ///         base-sepolia.md "Deployer / distributor"), impersonated on the fork to fund a
@@ -160,6 +167,25 @@ contract DeployTestnetCutoverForkTest is Test {
     /// @notice The mirror image on the LIVE deployment, read off the fork: it still carries the
     ///         global counter and has no epoch mapping. This is what makes the repoint a cutover
     ///         rather than a redeploy -- until it lands, a derived id names nothing on chain.
+    /// @notice The mirror image, read off the LIVE deployment rather than a fresh simulated one:
+    ///         the 2026-08-28 broadcast of this very script is what the fleet now settles through,
+    ///         and it answers `channelEpoch` and has no `channelCounter`. If either flips, the
+    ///         fleet has been repointed at something this script did not deploy.
+    function testFork_Cutover_LiveDeploymentDerivesChannelIds() public {
+        assertEq(
+            TokenNetworkRegistry(LIVE_REGISTRY).getTokenNetwork(EXISTING_USDC),
+            LIVE_TOKEN_NETWORK,
+            "the live registry must resolve EXISTING_USDC to the live TokenNetwork"
+        );
+        assertEq(
+            TokenNetwork(LIVE_TOKEN_NETWORK).channelEpoch(address(0x1), address(0x2)),
+            0,
+            "the live TokenNetwork must answer channelEpoch (ADR 0059)"
+        );
+        (bool ok,) = LIVE_TOKEN_NETWORK.staticcall(abi.encodeWithSignature("channelCounter()"));
+        assertFalse(ok, "the live TokenNetwork must have no global channelCounter (ADR 0059)");
+    }
+
     function testFork_Cutover_LiveDeploymentStillCarriesTheGlobalCounter() public view {
         (bool counterAnswers, bytes memory counterReturn) =
             OLD_2771_TOKEN_NETWORK.staticcall(abi.encodeWithSignature("channelCounter()"));

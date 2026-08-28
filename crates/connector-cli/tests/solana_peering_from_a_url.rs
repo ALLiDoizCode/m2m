@@ -546,8 +546,36 @@ async fn fund(b: &Router, keys: &NodeKeys, channel: &str, amount: u128) -> serde
     serde_json::from_slice(&body).expect("a JSON body")
 }
 
+/// `GET /routes/peers` on node B: the peer-forwarding routing table as the
+/// operator surface reports it, config-file and runtime rows alike.
+async fn peer_routes(b: &Router) -> serde_json::Value {
+    let response = b
+        .clone()
+        .oneshot(bearer_get("/routes/peers"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    body_json(response).await
+}
+
+/// The one row [`route_through_peering`] lands, as `GET /routes/peers`
+/// must report it: the posted prefix, peer and price, tagged `runtime`.
+fn expected_routing_table() -> serde_json::Value {
+    serde_json::json!([{
+        "prefix": A_PREFIX,
+        "peer_id": PEER_ID,
+        "price": APP_PRICE,
+        "source": "runtime",
+    }])
+}
+
 /// `POST /routes/peers` on node B: forward `A_PREFIX` to the peering.
 async fn route_through_peering(b: &Router, keys: &NodeKeys) {
+    assert_eq!(
+        peer_routes(b).await,
+        serde_json::json!([]),
+        "a node with no `[[routes]]` peer form and no runtime writes forwards nothing"
+    );
     let body = serde_json::to_vec(&serde_json::json!({
         "prefix": A_PREFIX,
         "peer_id": PEER_ID,
@@ -566,6 +594,16 @@ async fn route_through_peering(b: &Router, keys: &NodeKeys) {
         StatusCode::OK,
         "POST /routes/peers must accept a route through a peering that can pay (#1217): {}",
         String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        expected_routing_table()[0],
+        "the write answers with the row it landed"
+    );
+    assert_eq!(
+        peer_routes(b).await,
+        expected_routing_table(),
+        "GET /routes/peers is the routing table: exactly the posted row, tagged `runtime`"
     );
 }
 
@@ -863,6 +901,11 @@ async fn a_solana_runtime_peering_can_pay_the_forward_it_accepted_and_still_can_
     let peers: Vec<PeerView> = serde_json::from_slice(&body_bytes(response).await).unwrap();
     assert_eq!(peers.len(), 1, "the peering itself survived the restart");
     assert_eq!(peers[0].id, PEER_ID);
+    assert_eq!(
+        peer_routes(&router_b).await,
+        expected_routing_table(),
+        "the routing table survives the restart with the row still tagged `runtime`"
+    );
 
     originate_and_expect_fulfil(&router_b, &keys_b, &payee_identity, b"after a restart").await;
     assert_eq!(

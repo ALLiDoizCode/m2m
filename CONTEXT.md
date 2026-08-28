@@ -87,6 +87,16 @@ _Avoid_: allocated address, assigned address, address space (as though it were o
 **Route**:
 A mapping from a destination prefix to the next hop that should carry it.
 
+**Path**:
+The sequence of hops a packet actually takes from the sender to the route that terminates it —
+each hop a **peering** somebody chose, taking its fee and carrying the packet on. A destination is a
+prefix; a path is what a sender commits value to, because every hop holds the claim it was handed
+and any hop may decline to carry. The exposure on a path is therefore the one packet in flight, and
+it is bounded by sizing packets to the path's record — small on a new path, larger on one that has
+fulfilled — never by escrow. Two paths to the same prefix are two different things to trust.
+_Avoid_: destination (when the path is meant), route (a route is one hop's mapping, not the whole
+path)
+
 **Static route**:
 A route given to the connector by its configuration. Durable across restarts, and always
 beats a leased route for the same prefix.
