@@ -3750,6 +3750,56 @@ write_keys = ["{key}"]
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// The dashboard is part of the operator surface (ADR 0066): mounted
+    /// with it, and -- like `/metrics` -- a 404 rather than a page on a
+    /// node that configured no `[operator]`, so an unconfigured node
+    /// advertises nothing about having one.
+    #[tokio::test]
+    async fn the_dashboard_is_mounted_with_the_operator_surface_and_not_without_it() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let get_dashboard = |app: axum::Router| async move {
+            let request = Request::builder()
+                .uri("/dashboard")
+                .body(Body::empty())
+                .unwrap();
+            app.oneshot(request).await.unwrap().status()
+        };
+
+        let (with_operator, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[operator]
+bearer_token = "operator-secret"
+write_keys = ["{key}"]
+"#,
+                key_path.display()
+            )
+        });
+        let runtime = build(&with_operator).await.expect("build");
+        let app = router(&runtime, &with_operator).expect("router");
+        assert_eq!(get_dashboard(app).await, StatusCode::OK);
+
+        let (without_operator, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+        let runtime = build(&without_operator).await.expect("build");
+        let app = router(&runtime, &without_operator).expect("router");
+        assert_eq!(get_dashboard(app).await, StatusCode::NOT_FOUND);
+    }
+
     /// Issue #1136: a declared EIP-712 domain (ADR 0024) is held against
     /// the `TokenNetwork` this node actually redeems through, and a node
     /// whose file and chain disagree refuses to start.

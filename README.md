@@ -510,12 +510,27 @@ that will do the signing.
 
 `/metrics` is a bearer-gated read like any other. There is **no** unauthenticated
 metrics path and **no** health endpoint; absent `[operator]`, `/metrics` is not
-mounted and answers 404 rather than 401. A public dashboard therefore needs a
-server-side holder for the token — never a token in a browser.
+mounted and answers 404 rather than 401. A _public_ status page — one strangers
+load — therefore needs a server-side holder for the token, never the token
+embedded in the page. Your own browser session is different, and that is what
+the dashboard below is.
 
 The counters are `toon_packets_total`, `toon_packets_rejected_total`,
 `toon_fees_earned_total`, `toon_settlement_total`, and `toon_exposure`, which is
 always zero and kept only so scrape configs do not break.
+
+### The dashboard
+
+`GET /dashboard` is the operator's own view of all of the above on one page the
+node serves (ADR 0066): packet traffic and rejects by code, fees earned, inbound
+and outbound claims, peerings and channels, every route with its source, and
+the audit log. It needs no token to load, because it holds nothing. Paste the
+bearer token in and it reads; paste an operator key in and it can peer, write a
+runtime route or lease one, signing each write in your browser exactly as
+`connector send` would. The key stays in the tab's memory — never stored, never
+sent — and config-file rows are shown with no button, because a price or a fee
+still changes by editing the file and restarting. Reach the page the way you
+reach `/metrics` on that box: on the fleet, an SSH tunnel to `client_edge_addr`.
 
 ### Writes
 

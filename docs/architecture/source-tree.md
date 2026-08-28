@@ -118,7 +118,8 @@ connector-client-edge            axum Router, mountable rather than a server:
                                   GET /ilp/routes/price, POST /ilp/claim-state
 connector-operator               axum Router: bearer-gated reads, RFC 9421-signed writes
                                   (ADR 0008), each accepted signature retained as its
-                                  write's audit record
+                                  write's audit record; GET /dashboard, the operator
+                                  dashboard embedded from dashboard.html (ADR 0066)
 connector-cli                    config → runtime → merged routers → bound listeners,
                                   plus the `send` verb; the binary itself branches on
                                   nothing

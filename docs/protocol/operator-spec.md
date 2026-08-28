@@ -254,6 +254,10 @@ labelled by source), channels, claims, node identity, the write audit log, and m
 The audit log is the one worth knowing about: **every accepted write is retained as its own
 signature**, not as a log line asserting that something happened.
 
+`GET /dashboard` puts all of that on one page the node serves, with a form for each write that
+can be made at runtime, signed in the operator's browser
+([ADR 0066](../adr/0066-the-operator-dashboard-is-a-page-the-surface-serves-and-signs-in-the-browser.md)). It needs no credential to load and confers none.
+
 ### 2.3 Key rotation
 
 Rotating the identity key **invalidates every condition already minted against the old one**. A packet
@@ -304,7 +308,11 @@ response to anything arriving over the network.
 Content-Digest binding the signature to the body: `POST /packets` · `POST|DELETE /peers` ·
 `POST /routes/leased` · `POST|DELETE /routes/peers` · `POST /channels` · `/channels/:id/fund` ·
 `/channels/:id/redeem` · `/channels/:id/redeem-latest` · `/channels/:id/close` ·
-`/channels/:id/cooperative-close`
+`/channels/:id/settle` · `/channels/:id/cooperative-close`
+
+**Page** — no authentication: `GET /dashboard`, the operator dashboard, which reads and writes
+through exactly the lines above from the operator's browser
+([ADR 0066](../adr/0066-the-operator-dashboard-is-a-page-the-surface-serves-and-signs-in-the-browser.md)).
 
 Two mechanisms sit behind the write half that [ADR 0008](../adr/0008-operator-surface-splits-read-from-write.md)'s
 Decision does not name — **replay rejection**, and the **audit log** the retained signatures are
@@ -323,8 +331,9 @@ Uses exactly the vocabulary of [`CONTEXT.md`](../../CONTEXT.md) and implements
 [ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md),
 [ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md),
 [ADR 0058](../adr/0058-a-peering-is-established-from-a-url.md),
-[ADR 0059](../adr/0059-a-channel-is-derived-from-its-participants.md) and
-[ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md).
+[ADR 0059](../adr/0059-a-channel-is-derived-from-its-participants.md),
+[ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) and
+[ADR 0066](../adr/0066-the-operator-dashboard-is-a-page-the-surface-serves-and-signs-in-the-browser.md).
 
 **Coverage:** none of OP-01 – OP-07 is vectored and none will be. The operator surface is not a wire
 surface; per [ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md)
