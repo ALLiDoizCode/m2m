@@ -44,7 +44,10 @@ futures-util = "0.3"
 url = "2"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+# `net` for the one test that needs a real listener: `ws`'s dialed session
+# splitting a socket is the half a `PeerDialer` fake cannot stand in for
+# (issue #1240), so `a_dialed_session_dies_with_its_socket` binds one.
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "test-util"] }
 libsecp256k1 = "0.6"
 # A genuinely signed Solana balance proof, for the tests that hold what
 # this carriage does with a peer claim's declared `programId`
