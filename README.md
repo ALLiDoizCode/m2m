@@ -234,7 +234,7 @@ both — with both, it accepts claims on both at once.
 # EVM — Base Sepolia. These are live addresses, not placeholders.
 [settlement.evm]
 rpc_url          = "https://base-sepolia-rpc.publicnode.com"
-contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"  # the TokenNetworkRegistry, not a TokenNetwork
+contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # the TokenNetworkRegistry, not a TokenNetwork
 token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # the token every price on this node is in
 decimals         = 6              # units per token: 6 means 1,000,000 = 1.00
 
@@ -262,7 +262,7 @@ every node that might accept a given claim has to name the same one.
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Chain            | Base Sepolia, chain id `84532`                                                                                                                           | public devnet (`solana:devnet`)                                                                                                                                                 |
 | RPC              | `https://base-sepolia-rpc.publicnode.com`                                                                                                                | `https://api.devnet.solana.com`                                                                                                                                                 |
-| Channels live in | [`0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1`](https://sepolia.basescan.org/address/0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1) — `TokenNetworkRegistry` | [`2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`](https://explorer.solana.com/address/2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip?cluster=devnet) — the payment-channel program |
+| Channels live in | [`0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5`](https://sepolia.basescan.org/address/0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5) — `TokenNetworkRegistry` | [`2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`](https://explorer.solana.com/address/2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip?cluster=devnet) — the payment-channel program |
 | Token            | [`0x49beE1Bca5d15Fb0963117923403F9498119a9Ce`](https://sepolia.basescan.org/address/0x49beE1Bca5d15Fb0963117923403F9498119a9Ce) — mock USDC, 6 dp        | [`34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU`](https://explorer.solana.com/address/34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU?cluster=devnet) — mock USDC mint, 6 dp        |
 | Funding the key  | Base Sepolia ETH for gas; mock USDC from the [devnet faucet](https://faucet.devnet.toonprotocol.dev)                                                     | devnet SOL (`solana airdrop 1 <address> -u devnet`); mock USDC from the same faucet                                                                                             |
 | Full record      | [`packages/contracts/deployments/base-sepolia.md`](packages/contracts/deployments/base-sepolia.md)                                                       | [`packages/solana-program/deployments/devnet-public.md`](packages/solana-program/deployments/devnet-public.md)                                                                  |

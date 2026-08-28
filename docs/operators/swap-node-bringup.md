@@ -159,7 +159,7 @@ material or funds this environment does not have.
    `deploy/connector-rust/README.md` step 1 already requires for `signer-rust.key`.
 
 4. **Announce-loop pay channel.** Open and fund an ordinary EVM payment channel (the fleet's
-   standard `TokenNetworkRegistry`, `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1`) from the
+   standard `TokenNetworkRegistry`, `0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5`) from the
    index-2 settlement address to the relay box, mirroring how
    `infra/linode-store/connector-rust.toml`'s own `[announce] pay_channel` was opened and funded
    before ADR 0046 removed it. Replace
