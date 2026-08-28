@@ -270,27 +270,39 @@ it.
   (`client-edge-spec.md:457-464`). Before that ADR a forwarded destination "was greeted with
   nothing, required no claim and was carried for free; that was a free gateway, not a design".
 
-**Live evidence, this fleet, 2026-08-07** (recorded while the apex still ran — issue #872 has since
-removed it and the `apex-store` peering with it; see the note below). The store box paid box 1 **as a
-client, not as a peer**, even though an `apex-store` peering _was_ configured between them. Both
-halves of that peering were in the store box's config — a `[[peers]]` row and a `[[peer_channels]]`
-row in `infra/linode-store/connector-rust.toml` — and the box nonetheless paid through `[announce]
-pay_channel`, which that same file describes in as many words as "a funded EVM channel this box PAYS
-… as an ordinary client … deliberately NOT a `[[client_channels]]` row". The peer channel had
-nothing to claim against: the committed row was still the issue #822 placeholder, and the live box's
-row named a real channel (`0x0bfd0b88…`) whose deposit was 0, so a claim on it is refused before it
-is ever signed — `InsufficientHeadroom`, because "a claim above what has actually been deposited
-could never be redeemed on chain" (`crates/connector-cli/src/announce.rs:227-233` for the error,
-`:1546-1559` for the check). It fell back to a client channel, and that fallback is the point: on
-that path every packet is covered by a claim, and an uncovered one is answered `402` with the x402
-terms (`crates/connector-cli/src/announce.rs:294`). #868's rule was already what ran in production on
-the link that mattered, with no shared credential anywhere in it.
+**Historical evidence, this fleet, 2026-08-07 — a configuration that no longer exists.** This
+paragraph is kept as a dated record, not as a description of anything runnable today: the apex it
+observed was removed by issue #872, and the `[announce]` section it names was deleted outright by
+[ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md)
+(issue #1074). Read it for what it established about §1.2's rule, and do not expect to reproduce
+it. Its citations have been re-pointed at the code that carries the behaviour now (issue #1191);
+the behaviour survived the deletion, the file that held it did not.
+
+The store box paid box 1 **as a client, not as a peer**, even though an `apex-store` peering _was_
+configured between them. Both halves of that peering were in the store box's config — a `[[peers]]`
+row and a `[[peer_channels]]` row in `infra/linode-store/connector-rust.toml` — and the box
+nonetheless paid through what was then `[announce] pay_channel`, which that same file describes in as
+many words as "a funded EVM channel this box PAYS … as an ordinary client … deliberately NOT a
+`[[client_channels]]` row". The peer channel had nothing to claim against: the committed row was
+still the issue #822 placeholder, and the live box's row named a real channel (`0x0bfd0b88…`) whose
+deposit was 0, so a claim on it is refused before it is ever signed — `InsufficientHeadroom`, because
+"a claim above what has actually been deposited could never be redeemed on chain"
+(`crates/connector-runtime/src/outbound_client.rs:258-269` for the error, `:640-650` for the check).
+It fell back to a client channel, and that fallback is the point: on that path every packet is covered
+by a claim, and an uncovered one is answered `402` with the x402 terms
+(`crates/connector-client-edge/src/lib.rs:754-782`, and `btp.rs:684`/`:725` for the BTP half).
+#868's rule was already what ran in production on the link that mattered, with no shared credential
+anywhere in it.
 
 **Still true after #872, and more so.** The apex is gone and neither surviving box carries a
-`[[peers]]`/`[[peer_channels]]` table at all, so the store box now buys relay writes over exactly
-that client path (`[announce] publish_to`/`pay_channel` naming the relay box, issue #871) with no
-peering to fall back from. The peer-carriage rules this spec states still describe what a peering
-must do; this fleet simply has none to demonstrate them on today.
+`[[peers]]`/`[[peer_channels]]` table at all, so the store box buys relay writes over exactly that
+client path with no peering to fall back from (issue #871). The keys that configured it —
+`[announce] publish_to` and `[announce] pay_channel` — are **not live configuration**: under ADR 0046
+the section is `[node]`, carrying only `addresses`, `http_endpoint` and `btp_endpoint`, and each
+announce-only key is now parsed in order to be refused by name at boot (`AnnounceKeyRemoved`,
+`crates/connector-config/src/node.rs:213-229`; `AnnounceSectionRenamed`, `config.rs:394`, for the
+section itself). The peer-carriage rules this spec states still describe what a peering must do;
+this fleet simply has none to demonstrate them on today.
 
 #### Superseded 2026-08-07 by #868 — the credit-window rationale for P1
 
