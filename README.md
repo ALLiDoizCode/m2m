@@ -401,10 +401,40 @@ carries a `price` too — it is what the caller pays for the path — while the
 > - **Their identity is trust-on-first-use over TLS, pinned by nothing.** You
 >   are trusting whoever answers that URL today.
 
+### A route is a path, not a destination
+
 Every `PREPARE` you forward carries its own covering claim, so nothing is ever
 owed between packets — and equally, a hop can take your claim and decline to
-carry. The bound on that is `max_packet_amount`, which is why it is yours to set.
-The kill switch is `DELETE /peers/:id`.
+carry. That is not a defect to be engineered away; it is the shape of the
+protocol, and payment channels exist precisely so that it costs you almost
+nothing. Once a packet leaves you, its value is signed away: a fulfilment is a
+delivery receipt, not a payment trigger, and a `REJECT` (an `F02` for a name
+nobody routes, a `T01` for a peer that was not there) comes back with your
+claim already spent. What the channel buys you is that this can only ever
+happen to **one packet** — the last one in flight. Nobody holds your deposit;
+every hop holds only what you have already signed to it, and the most the next
+hop can walk away with is the one packet you just handed it.
+
+So the risk of a hop is not something you check, it is something you **size**.
+Keep packets small — a relay write is 1 micro-USDC, a store upload is priced
+per kibibyte, and "large volumes of low-value packets" is what ILPv4 is designed
+for (RFC 0027; RFC 0018 calls the small packet the default risk mitigation).
+Then let the amount grow with the route's record: a path that has fulfilled a
+thousand packets has earned a bigger one, a path you opened this morning has
+not. `max_packet_amount` is the same number seen from the other side — the
+largest single packet you will carry _for_ a peer, which is the most that peer
+can cost you at once — and it is yours to choose for the same reason.
+
+That is why this section is called peering and not addressing. A destination
+is just a prefix; what you actually commit money to is the **path** the packet
+takes to it — the hops between you and the prefix, each one a peering someone
+chose, each one taking its fee and each one a place the packet can stop. The
+relay in this fleet does not "send to the store"; it forwards
+`g.toon.relay.store` across the one peering it holds with the store, on the
+one channel it funded, at the one cap it set. Two paths to the same prefix
+are two different things to trust, and a well-trodden one is worth more than
+a short one. The kill switch for a path you have stopped trusting is
+`DELETE /peers/:id`.
 
 ---
 
