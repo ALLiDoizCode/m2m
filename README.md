@@ -436,6 +436,10 @@ are two different things to trust, and a well-trodden one is worth more than
 a short one. The kill switch for a path you have stopped trusting is
 `DELETE /peers/:id`.
 
+The long version of this — why Glinda says _follow the yellow brick road_
+rather than giving Dorothy an address — is
+[`docs/the-yellow-brick-road.md`](docs/the-yellow-brick-road.md).
+
 ---
 
 ## The operator surface
@@ -564,17 +568,18 @@ empty tier** — no machines, no mainnet contracts, no keys.
 
 ## Where to go next
 
-| Path                                                                         | What it is                                                                              |
-| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| [`docs/rfcs/`](docs/rfcs/README.md)                                          | **The protocol.** Interledger, the ten vendored RFCs, and where TOON departs from each. |
-| [`docs/protocol/configuration-spec.md`](docs/protocol/configuration-spec.md) | Every config key, and what each one binds.                                              |
-| [`docs/protocol/operator-spec.md`](docs/protocol/operator-spec.md)           | The operator surface's rules, numbered.                                                 |
-| [`docs/operators/`](docs/operators/)                                         | Runbooks: peering bring-up, key rotation, fleet release and health.                     |
-| [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md)         | The container path in full, including a hand-built image.                               |
-| [`local/`](local/README.md)                                                  | The shipped image against real chains — `make local-verify`.                            |
-| [`CONTEXT.md`](CONTEXT.md)                                                   | The vocabulary. Read before writing docs or naming anything.                            |
-| [`docs/adr/`](docs/adr/README.md)                                            | Why any of this is the way it is. The tiebreaker for everything.                        |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md)                                         | Building from source, the test gate, the chain binaries it needs.                       |
+| Path                                                                         | What it is                                                                                  |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [`docs/the-yellow-brick-road.md`](docs/the-yellow-brick-road.md)             | **The idea.** Why you pay a path and not a destination, and why the road earns the traffic. |
+| [`docs/rfcs/`](docs/rfcs/README.md)                                          | **The protocol.** Interledger, the ten vendored RFCs, and where TOON departs from each.     |
+| [`docs/protocol/configuration-spec.md`](docs/protocol/configuration-spec.md) | Every config key, and what each one binds.                                                  |
+| [`docs/protocol/operator-spec.md`](docs/protocol/operator-spec.md)           | The operator surface's rules, numbered.                                                     |
+| [`docs/operators/`](docs/operators/)                                         | Runbooks: peering bring-up, key rotation, fleet release and health.                         |
+| [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md)         | The container path in full, including a hand-built image.                                   |
+| [`local/`](local/README.md)                                                  | The shipped image against real chains — `make local-verify`.                                |
+| [`CONTEXT.md`](CONTEXT.md)                                                   | The vocabulary. Read before writing docs or naming anything.                                |
+| [`docs/adr/`](docs/adr/README.md)                                            | Why any of this is the way it is. The tiebreaker for everything.                            |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md)                                         | Building from source, the test gate, the chain binaries it needs.                           |
 
 ## License
 
