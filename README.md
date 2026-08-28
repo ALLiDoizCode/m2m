@@ -234,7 +234,7 @@ both — with both, it accepts claims on both at once.
 # EVM — Base Sepolia. These are live addresses, not placeholders.
 [settlement.evm]
 rpc_url          = "https://base-sepolia-rpc.publicnode.com"
-contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"  # the TokenNetworkRegistry, not a TokenNetwork
+contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # the TokenNetworkRegistry, not a TokenNetwork
 token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # the token every price on this node is in
 decimals         = 6              # units per token: 6 means 1,000,000 = 1.00
 
@@ -262,7 +262,7 @@ every node that might accept a given claim has to name the same one.
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Chain            | Base Sepolia, chain id `84532`                                                                                                                           | public devnet (`solana:devnet`)                                                                                                                                                 |
 | RPC              | `https://base-sepolia-rpc.publicnode.com`                                                                                                                | `https://api.devnet.solana.com`                                                                                                                                                 |
-| Channels live in | [`0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1`](https://sepolia.basescan.org/address/0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1) — `TokenNetworkRegistry` | [`2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`](https://explorer.solana.com/address/2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip?cluster=devnet) — the payment-channel program |
+| Channels live in | [`0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5`](https://sepolia.basescan.org/address/0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5) — `TokenNetworkRegistry` | [`2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`](https://explorer.solana.com/address/2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip?cluster=devnet) — the payment-channel program |
 | Token            | [`0x49beE1Bca5d15Fb0963117923403F9498119a9Ce`](https://sepolia.basescan.org/address/0x49beE1Bca5d15Fb0963117923403F9498119a9Ce) — mock USDC, 6 dp        | [`34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU`](https://explorer.solana.com/address/34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU?cluster=devnet) — mock USDC mint, 6 dp        |
 | Funding the key  | Base Sepolia ETH for gas; mock USDC from the [devnet faucet](https://faucet.devnet.toonprotocol.dev)                                                     | devnet SOL (`solana airdrop 1 <address> -u devnet`); mock USDC from the same faucet                                                                                             |
 | Full record      | [`packages/contracts/deployments/base-sepolia.md`](packages/contracts/deployments/base-sepolia.md)                                                       | [`packages/solana-program/deployments/devnet-public.md`](packages/solana-program/deployments/devnet-public.md)                                                                  |
@@ -401,10 +401,54 @@ carries a `price` too — it is what the caller pays for the path — while the
 > - **Their identity is trust-on-first-use over TLS, pinned by nothing.** You
 >   are trusting whoever answers that URL today.
 
+### A route is a path, not a destination
+
 Every `PREPARE` you forward carries its own covering claim, so nothing is ever
 owed between packets — and equally, a hop can take your claim and decline to
-carry. The bound on that is `max_packet_amount`, which is why it is yours to set.
-The kill switch is `DELETE /peers/:id`.
+carry. That is not a defect to be engineered away; it is the shape of the
+protocol, and payment channels exist precisely so that it costs you almost
+nothing. Once a packet leaves you, its value is signed away: a fulfilment is a
+delivery receipt, not a payment trigger, and a `REJECT` (an `F02` for a name
+nobody routes, a `T01` for a peer that was not there) comes back with your
+claim already spent. What the channel buys you is that this can only ever
+happen to **one packet** — the last one in flight. Nobody holds your deposit;
+every hop holds only what you have already signed to it, and the most the next
+hop can walk away with is the one packet you just handed it.
+
+So the risk of a hop is not something you check, it is something you **size**.
+Keep packets small — a relay write is 1 micro-USDC, a store upload is priced
+per kibibyte, and "large volumes of low-value packets" is what ILPv4 is designed
+for (RFC 0027; RFC 0018 calls the small packet the default risk mitigation).
+Then let the amount grow with the route's record: a path that has fulfilled a
+thousand packets has earned a bigger one, a path you opened this morning has
+not. `max_packet_amount` is the same number seen from the other side — the
+largest single packet you will carry _for_ a peer, which is the most that peer
+can cost you at once — and it is yours to choose for the same reason.
+
+That is why this section is called peering and not addressing. A destination
+is just a prefix; what you actually commit money to is the **path** the packet
+takes to it — the hops between you and the prefix, each one a peering someone
+chose, each one taking its fee and each one a place the packet can stop. The
+relay in this fleet does not "send to the store"; it forwards
+`g.toon.relay.store` across the one peering it holds with the store, on the
+one channel it funded, at the one cap it set. Two paths to the same prefix
+are two different things to trust, and a well-trodden one is worth more than
+a short one. The kill switch for a path you have stopped trusting is
+`DELETE /peers/:id`.
+
+Hop count is worth thinking about the same way. Fees add up per hop; exposure
+does not. You hand your packet to the first hop and that hop is your only
+counterparty — what happens further down is the next hop's business, on the
+next hop's channel, under its own cap — so a packet that dies anywhere costs
+you the one packet you sent, whether it died at the second hop or the tenth.
+Ten well-walked hops therefore beat two with a stranger in them: the extra
+hops cost a few micro-USDC in fees, and the stranger can cost you the whole
+packet. Longer roads also tend to run through nodes that peer widely, which
+have another way onward when one leg goes dark.
+
+The long version of this — why Glinda says _follow the yellow brick road_
+rather than giving Dorothy an address — is
+[`docs/the-yellow-brick-road.md`](docs/the-yellow-brick-road.md).
 
 ---
 
@@ -549,17 +593,18 @@ empty tier** — no machines, no mainnet contracts, no keys.
 
 ## Where to go next
 
-| Path                                                                         | What it is                                                                              |
-| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| [`docs/rfcs/`](docs/rfcs/README.md)                                          | **The protocol.** Interledger, the ten vendored RFCs, and where TOON departs from each. |
-| [`docs/protocol/configuration-spec.md`](docs/protocol/configuration-spec.md) | Every config key, and what each one binds.                                              |
-| [`docs/protocol/operator-spec.md`](docs/protocol/operator-spec.md)           | The operator surface's rules, numbered.                                                 |
-| [`docs/operators/`](docs/operators/)                                         | Runbooks: peering bring-up, key rotation, fleet release and health.                     |
-| [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md)         | The container path in full, including a hand-built image.                               |
-| [`local/`](local/README.md)                                                  | The shipped image against real chains — `make local-verify`.                            |
-| [`CONTEXT.md`](CONTEXT.md)                                                   | The vocabulary. Read before writing docs or naming anything.                            |
-| [`docs/adr/`](docs/adr/README.md)                                            | Why any of this is the way it is. The tiebreaker for everything.                        |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md)                                         | Building from source, the test gate, the chain binaries it needs.                       |
+| Path                                                                         | What it is                                                                                  |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [`docs/the-yellow-brick-road.md`](docs/the-yellow-brick-road.md)             | **The idea.** Why you pay a path and not a destination, and why the road earns the traffic. |
+| [`docs/rfcs/`](docs/rfcs/README.md)                                          | **The protocol.** Interledger, the ten vendored RFCs, and where TOON departs from each.     |
+| [`docs/protocol/configuration-spec.md`](docs/protocol/configuration-spec.md) | Every config key, and what each one binds.                                                  |
+| [`docs/protocol/operator-spec.md`](docs/protocol/operator-spec.md)           | The operator surface's rules, numbered.                                                     |
+| [`docs/operators/`](docs/operators/)                                         | Runbooks: peering bring-up, key rotation, fleet release and health.                         |
+| [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md)         | The container path in full, including a hand-built image.                                   |
+| [`local/`](local/README.md)                                                  | The shipped image against real chains — `make local-verify`.                                |
+| [`CONTEXT.md`](CONTEXT.md)                                                   | The vocabulary. Read before writing docs or naming anything.                                |
+| [`docs/adr/`](docs/adr/README.md)                                            | Why any of this is the way it is. The tiebreaker for everything.                            |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md)                                         | Building from source, the test gate, the chain binaries it needs.                           |
 
 ## License
 
