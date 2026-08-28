@@ -110,3 +110,38 @@ Sizes differ from the pre-cutover deployment because both contracts gained `ERC2
 (#694). A byte-for-byte `cast code` vs local-compile comparison in the style of the section above
 has **not** been redone; if that exact form of evidence is wanted for the new addresses, redo it
 the same way and record it here.
+
+---
+
+## ADR 0059 cutover redeployment (2026-08-28)
+
+Triggered again by this file's own rule. Both contracts were compiled and broadcast from this
+repository's `packages/contracts/src` at commit `c714551a` in one
+`forge script script/DeployTestnetCutover.s.sol --broadcast` run, and — unlike the 2026-08-06
+section above — the byte-for-byte comparison **was** redone, in the exact form of the original
+check: `forge build` with the committed `foundry.toml` (`solc 0.8.26`, `optimizer = true`,
+`optimizer_runs = 200`, `via_ir = true`), `cast code <address> --rpc-url https://sepolia.base.org`,
+compared against `out/<Contract>.sol/<Contract>.json`'s `.deployedBytecode.object` with the byte
+ranges in `.deployedBytecode.immutableReferences` masked on both sides.
+
+| Contract             | Address                                      | Runtime bytecode | Result                                               |
+| -------------------- | -------------------------------------------- | ---------------- | ---------------------------------------------------- |
+| ERC2771Forwarder     | `0x350fCd266F95B1f5B84944E0C7e06C16B837FCAA` | —                | OpenZeppelin's, not this repo's source; not compared |
+| TokenNetworkRegistry | `0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5` | 10573 bytes      | **exact match**, no immutables, metadata included    |
+| TokenNetwork (USDC)  | `0xe9E05dfecfe165266C88d73e61D483612651952a` | 6996 bytes       | **exact match** outside 20 immutable slots           |
+
+The masked `TokenNetwork` slots decode to exactly what this deployment implies, each corroborated
+by a live view call:
+
+| immutable                      | live value                                      | confirmation                           |
+| ------------------------------ | ----------------------------------------------- | -------------------------------------- |
+| `ERC2771Context` forwarder     | `0x350fCd266F95B1f5B84944E0C7e06C16B837FCAA`    | `isTrustedForwarder(...) == true`      |
+| `token`                        | `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce`    | `token()`                              |
+| `maxChannelDeposit`            | `0xd3c21bcecceda1000000` = `1_000_000 * 10**18` | `TokenNetworkRegistry.sol`'s fixed cap |
+| `maxChannelLifetime`           | `0x1e13380` = `31536000` s = 365 days           | —                                      |
+| EIP-712 name / version         | `"TokenNetwork"` / `"1"`                        | `eip712Domain()`                       |
+| EIP-712 chain id               | `0x14a34` = `84532`                             | Base Sepolia                           |
+| EIP-712 cached `address(this)` | `0xe9E05dfecfe165266C88d73e61D483612651952a`    | the contract's own address             |
+| EIP-712 cached hashes          | name / version / type hashes                    | derived from the two strings above     |
+
+Reproduce with the commands under "Reproducing this check" above, against these two addresses.

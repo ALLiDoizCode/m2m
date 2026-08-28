@@ -3,18 +3,20 @@
 The committed runbook for redeploying `TokenNetwork` to Base Sepolia devnet and repointing every
 place this repo names a settlement contract address. `TokenNetwork` is not upgradeable, so every
 change to it is a cutover of this shape, and this file accumulates them: issue #695's meta-tx-aware
-deployment (#694, live since 2026-08-06) and now ADR 0059's derived channel id (not yet broadcast).
+deployment (#694, live 2026-08-06 to 2026-08-28) and ADR 0059's derived channel id (broadcast 2026-08-28,
+live).
 Read this before touching any of the files it names; `docs/devnet-pricing.md` exists for the same
 reason on the pricing side (connector#785) -- a hand-edit on one box or one file, unreconciled with
 the rest, is exactly the failure mode both documents exist to prevent.
 
-## Status: the ERC-2771 cutover BROADCAST 2026-08-06 and is live; ADR 0059's redeploy has NOT
+## Status: BOTH cutovers have broadcast; ADR 0059's (2026-08-28) is the live one
 
-This document now covers two cutovers of the same shape. The 2026-08-06 ERC-2771 one is done and
-live, and is recorded below exactly as it was written. ADR 0059's derived-channel-id redeploy is
-prepared but **not broadcast** — its runbook is
-["Second cutover, PENDING"](#second-cutover-pending-adr-0059s-derived-channel-id) below, and it is
-the one an operator reading this today is looking for.
+This document covers two cutovers of the same shape. The 2026-08-06 ERC-2771 one is recorded
+below exactly as it was written and is now **superseded**. ADR 0059's derived-channel-id redeploy
+**broadcast 2026-08-28 at block 46055303** — registry `0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5`,
+`TokenNetwork` `0xe9E05dfecfe165266C88d73e61D483612651952a` — and is what every `[settlement.evm] contract_address`
+in this repository now names; its record is
+["Second cutover"](#second-cutover-broadcast-2026-08-28-adr-0059s-derived-channel-id) below.
 
 ### The ERC-2771 cutover (#695), broadcast 2026-08-06
 
@@ -41,13 +43,27 @@ Full record, transaction hashes and post-broadcast on-chain verification:
 _pre-cutover_ deployment and the rollback target are kept as written -- the old registry is
 deliberately untouched and is exactly what a rollback points back at.
 
-## Second cutover, PENDING: ADR 0059's derived channel id
+## Second cutover, BROADCAST 2026-08-28: ADR 0059's derived channel id
 
-> **Status: NOT BROADCAST.** Everything below the broadcast line is prepared and proven on a fork;
-> the broadcast itself needs a funded Base-Sepolia deployer key this repo deliberately does not
-> hold, exactly as the 2026-08-06 cutover did. This section is the checklist for the operator who
-> holds it. Nothing in it invalidates the 2026-08-06 record above -- that deployment is still the
-> live one and stays live until the repoint below.
+> **Status: BROADCAST 2026-08-28 at block 46055303** (2026-08-28T01:01:34Z), from a dedicated deployer
+> `0x0E1e13d0A87e99F66715441CdFadfCD273134ADc` funded with 0.001 ETH from the gas box's settlement key for the
+> purpose (its key lives with the operator, outside every repository, and now owns the registry).
+> Every in-repo item of the repoint checklist below is ticked in the same change that flipped this
+> line; the node-repo and on-box items are ticked as they land. The full record — addresses,
+> transaction hashes, on-chain verification, bytecode provenance — is
+> `packages/contracts/deployments/base-sepolia.md`, "ADR 0059 cutover deployment (2026-08-28)".
+>
+> | Contract             | Address                                      |
+> | -------------------- | -------------------------------------------- |
+> | ERC2771Forwarder     | `0x350fCd266F95B1f5B84944E0C7e06C16B837FCAA` |
+> | TokenNetworkRegistry | `0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5` |
+> | TokenNetwork (USDC)  | `0xe9E05dfecfe165266C88d73e61D483612651952a` |
+>
+> One correction to the runbook as written, found on the broadcast: `PRIVATE_KEY` must be
+> `0x`-prefixed. `vm.envOr("PRIVATE_KEY", uint256(0))` parses a bare 64-hex string as decimal
+> and fails, so the script logs the keyless-simulation line and broadcasts nothing — the
+> simulation's addresses come out, which is exactly the "worthless as a prediction" trap step 1
+> warns about. The command below is corrected.
 >
 > **Written before [ADR 0068](adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).**
 > `infra/linode-relay/connector-rust.toml` and `infra/linode-store/connector-rust.toml` are now
@@ -65,17 +81,17 @@ advancing in `settleChannel`. `TokenNetwork` is not upgradeable (see "Why a fres
 below -- the same reasoning, unchanged), so this is a second redeploy of exactly the same shape:
 `DeployTestnetCutover.s.sol`, a fresh forwarder and registry, the **same** mock USDC.
 
-**What is live on Base Sepolia right now** (read off the chain 2026-08-26, not from this file):
+**What is live on Base Sepolia now** (read off the chain 2026-08-28, after the broadcast):
 
-| Question                        | The live `TokenNetwork` `0xa79C3b1d…` answers |
-| ------------------------------- | --------------------------------------------- |
-| `channelCounter()`              | `31` — the global counter is still there      |
-| `channelEpoch(address,address)` | reverts — the function does not exist         |
+| Question                        | The live `TokenNetwork` `0xe9E05dfe…` answers | The superseded `0xa79C3b1d…` |
+| ------------------------------- | --------------------------------------------- | ---------------------------- |
+| `channelCounter()`              | reverts — the global counter is gone          | `31`                         |
+| `channelEpoch(address,address)` | `0` — the function exists                     | reverts                      |
 
-The contract this repo builds answers the mirror image, and `test/DeployTestnetCutover.fork.t.sol`
-asserts both directions against a live fork
-(`testFork_Cutover_DeploysDerivedChannelIdsAndLeavesTheCounterBehind`,
-`testFork_Cutover_LiveDeploymentStillCarriesTheGlobalCounter`).
+`test/DeployTestnetCutover.fork.t.sol` asserts both columns against a live fork
+(`testFork_Cutover_LiveDeploymentDerivesChannelIds` for the live one,
+`testFork_Cutover_LiveDeploymentStillCarriesTheGlobalCounter` for the superseded one, and
+`testFork_Cutover_DeploysDerivedChannelIdsAndLeavesTheCounterBehind` for a fresh simulated deploy).
 
 ### The ordering hazard: contract, both configs and the image tag are one matched set
 
@@ -139,8 +155,8 @@ Human-only, exactly as the 2026-08-06 one was:
 
 ```shell
 cd packages/contracts
-PRIVATE_KEY=<funded-deployer-key-no-0x-prefix> \
-  forge script script/DeployTestnetCutover.s.sol --rpc-url base_sepolia --broadcast
+PRIVATE_KEY=0x<funded-deployer-key> \
+  forge script script/DeployTestnetCutover.s.sol --rpc-url https://sepolia.base.org --broadcast
 ```
 
 Record `BASE_FORWARDER_ADDRESS`, `BASE_REGISTRY_ADDRESS` and `BASE_TOKEN_NETWORK_ADDRESS` from the
@@ -158,57 +174,57 @@ files below is necessary but **not sufficient** — they are fixtures `devnet_co
 and the file that actually changes what a box runs is the matching one in `toon-protocol/relay` /
 `toon-protocol/store`'s own `deploy/` bundle. Change both.
 
-- [ ] `infra/linode-relay/connector-rust.toml` → `[settlement.evm] contract_address` = `<NEW REGISTRY>`
-- [ ] `infra/linode-store/connector-rust.toml` → `[settlement.evm] contract_address` = `<NEW REGISTRY>`
-- [ ] the matching field in `toon-protocol/relay`'s and `toon-protocol/store`'s own committed configs
+- [x] `infra/linode-relay/connector-rust.toml` → `[settlement.evm] contract_address` = `<NEW REGISTRY>`
+- [x] `infra/linode-store/connector-rust.toml` → `[settlement.evm] contract_address` = `<NEW REGISTRY>`
+- [ ] the matching field in `toon-protocol/relay`'s, `toon-protocol/store`'s and `toon-protocol/gas-station`'s own committed configs (each its own PR; the gas box holds the third connector on this chain since gas-station#5)
 
 **Test literals that pin the live fleet identity.** These fail the Rust gate the moment the configs
 above change, which is the point — they are the gate that says the two boxes agree with each other
 and with this record.
 
-- [ ] `crates/connector-bin/tests/devnet_configs_load.rs` → `FLEET_LIVE_REGISTRY` = `<NEW REGISTRY>`
-- [ ] `crates/connector-bin/tests/devnet_configs_load.rs` → `FLEET_LIVE_TOKEN_NETWORK` = `<NEW TOKEN NETWORK>`
-- [ ] `crates/connector-settlement-evm/tests/channel_index_sync.rs` → `DEVNET_TOKEN_NETWORK` = `<NEW TOKEN NETWORK>`
+- [x] `crates/connector-bin/tests/devnet_configs_load.rs` → `FLEET_LIVE_REGISTRY` = `<NEW REGISTRY>`
+- [x] `crates/connector-bin/tests/devnet_configs_load.rs` → `FLEET_LIVE_TOKEN_NETWORK` = `<NEW TOKEN NETWORK>`
+- [x] `crates/connector-settlement-evm/tests/channel_index_sync.rs` → `DEVNET_TOKEN_NETWORK` = `<NEW TOKEN NETWORK>`
 
 **Live-chain workflows that name the registry.** Both drive real Base Sepolia and would otherwise
 keep passing against the old deployment while quietly proving nothing about the one the fleet uses:
 
-- [ ] `.github/workflows/base-sepolia-redeem-gate.yml` → the job's `env: REGISTRY` = `<NEW REGISTRY>`
-- [ ] `.github/workflows/funded-ops.yml` → the base-sepolia job's `env: REGISTRY` = `<NEW REGISTRY>`
-- [ ] `crates/connector-bin/tests/base_sepolia_redeem_proof.rs` → `DEFAULT_REGISTRY` = `<NEW REGISTRY>`
+- [x] `.github/workflows/base-sepolia-redeem-gate.yml` → the job's `env: REGISTRY` = `<NEW REGISTRY>`
+- [x] `.github/workflows/funded-ops.yml` → the base-sepolia job's `env: REGISTRY` = `<NEW REGISTRY>`
+- [x] `crates/connector-bin/tests/base_sepolia_redeem_proof.rs` → `DEFAULT_REGISTRY` = `<NEW REGISTRY>`
 
 **The swap node's own config and the published endpoint list.** The maker signs leg-A claims against
 whatever `tokenNetworkAddress` says; leaving it on the old contract is the swap#134 failure with the
 value merely stale instead of missing.
 
-- [ ] `infra/linode-relay/swap.config.json` → `chainProviders[0].registryAddress` = `<NEW REGISTRY>`
-- [ ] `infra/linode-relay/swap.config.json` → `chainProviders[0].tokenNetworkAddress` = `<NEW TOKEN NETWORK>`
-- [ ] `infra/linode/endpoints.json` → `evm.registryAddress` and `baseSepolia.registryAddress` = `<NEW REGISTRY>`
-- [ ] `infra/linode/endpoints.json` → `evm.tokenNetworkUsdc` and `baseSepolia.tokenNetworkUsdc` =
+- [x] `infra/linode-relay/swap.config.json` → `chainProviders[0].registryAddress` = `<NEW REGISTRY>`
+- [x] `infra/linode-relay/swap.config.json` → `chainProviders[0].tokenNetworkAddress` = `<NEW TOKEN NETWORK>`
+- [x] `infra/linode/endpoints.json` → `evm.registryAddress` and `baseSepolia.registryAddress` = `<NEW REGISTRY>`
+- [x] `infra/linode/endpoints.json` → `evm.tokenNetworkUsdc` and `baseSepolia.tokenNetworkUsdc` =
       `<NEW TOKEN NETWORK>`. These two are **already stale**: they still name `0x1E95493f…`, the
       2026-07-18 `TokenNetwork`, and were missed by the 2026-08-06 repoint. Fix them to the new
       value rather than carrying the error forward.
 
 **Bookkeeping — the record of what is deployed.**
 
-- [ ] `packages/contracts/deployments/base-sepolia.md` → a new section in the shape of the existing
+- [x] `packages/contracts/deployments/base-sepolia.md` → a new section in the shape of the existing
       "ERC-2771 cutover deployment (2026-08-06)" one: network, RPC, date, deployer, block, script,
       the three addresses with their deploy tx hashes, the `setTrustedForwarder` tx, and the
       post-broadcast on-chain verification actually run — including `channelEpoch(address,address)`
       answering and `channelCounter()` reverting on the new `TokenNetwork`. Mark the 2026-08-06
       section **superseded**, not deleted.
-- [ ] `packages/contracts/deployments.json` → `networks["base-sepolia"].contracts` gains the new
+- [x] `packages/contracts/deployments.json` → `networks["base-sepolia"].contracts` gains the new
       `ERC2771Forwarder` / `TokenNetworkRegistry` / `TokenNetwork` entries alongside the existing
       `*_ERC2771` ones, each with `address`, `deployer`, `deployTxHash`, `blockNumber`, `deployedAt`.
-- [ ] `docs/evm-deployment.md` (this file) → this section's status line flips from **NOT BROADCAST**
+- [x] `docs/evm-deployment.md` (this file) → this section's status line flips from **NOT BROADCAST**
       to the date and block it broadcast at, and the live-state table above is rewritten against the
       new deployment.
-- [ ] `docs/adr/0059-a-channel-is-derived-from-its-participants.md` → the Status line's sentence
+- [x] `docs/adr/0059-a-channel-is-derived-from-its-participants.md` → the Status line's sentence
       "**The redeploy this needs has not happened**" is replaced by the date it did.
-- [ ] `crates/connector-settlement-evm/contracts/BYTECODE-PROVENANCE.md` → redone against the new
+- [x] `crates/connector-settlement-evm/contracts/BYTECODE-PROVENANCE.md` → redone against the new
       registry and `TokenNetwork` addresses. Its own text requires this: "If either contract is ever
       redeployed, this file must be redone against the new address."
-- [ ] `docs/operators/swap-node-bringup.md` and `docs/operators/peer-channel-migration.md` → the
+- [x] `docs/operators/swap-node-bringup.md` and `docs/operators/peer-channel-migration.md` → the
       registry/`TokenNetwork` addresses quoted in their prose. Both are operator instructions; a
       stale address in one sends a human to the wrong contract by hand.
 

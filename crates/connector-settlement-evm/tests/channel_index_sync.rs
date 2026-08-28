@@ -210,7 +210,7 @@ async fn a_settled_channel_is_indexed_as_terminal_without_a_further_chain_read()
 /// (`infra/linode-*/connector-rust.toml`), used verbatim so the recorded
 /// filter can be compared against the address an operator would read off
 /// the committed config.
-const DEVNET_TOKEN_NETWORK: &str = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478";
+const DEVNET_TOKEN_NETWORK: &str = "0xe9E05dfecfe165266C88d73e61D483612651952a";
 
 /// A JSON-RPC endpoint that refuses an `eth_getLogs` naming no contract,
 /// the way `https://base-sepolia-rpc.publicnode.com` -- the `rpc_url` both

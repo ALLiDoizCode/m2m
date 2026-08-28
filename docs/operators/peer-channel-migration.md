@@ -90,8 +90,8 @@ rollback means reverting the edit, not the on-chain state.
    `mint(address,uint256)` is ungated (`infra/linode/endpoints.json`'s own note), so a funded
    deployer key can mint directly instead.
 2. **Open the new channel.** Either participant calls
-   `openChannel(address participant2, uint256 settlementTimeout)` on the new `TokenNetwork`
-   (`0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478`) naming the _other_ participant's settlement
+   `openChannel(address participant2, uint256 settlementTimeout)` on the live `TokenNetwork`
+   (`0xe9E05dfecfe165266C88d73e61D483612651952a` since the 2026-08-28 ADR 0059 cutover; `docs/evm-deployment.md`) naming the _other_ participant's settlement
    address, with a `settlementTimeout` at least as long as the retired channel's — read that value
    off the OLD `TokenNetwork`'s `channels(bytes32)` rather than assuming the 1-hour contract
    minimum. Record the returned `channelId`: it is emitted in `ChannelOpened` and is the value both
