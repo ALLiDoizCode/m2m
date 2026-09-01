@@ -406,12 +406,12 @@ curl -s https://their-node.example/ilp | jq
 
 Four fields decide whether a peering is possible at all:
 
-| Field               | What it settles                                                                                                    |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `peerCarriages`     | Empty means not dialable — they have not set `peer_expose`, and your write will answer `502`.                      |
-| `httpEndpoint` / `btpEndpoint` | Where you dial, and which carriage: `wss://` is BTP, `https://` is ILP-over-HTTP. BTP wins where both are published. |
-| `settlements[]`     | You need a chain **in common**. No overlap is a `502`.                                                             |
-| `routes[].price`    | What their terminating route charges — the number your `--amount` has to cover. A decimal **string**, not a JSON number. |
+| Field                          | What it settles                                                                                                          |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `peerCarriages`                | Empty means not dialable — they have not set `peer_expose`, and your write will answer `502`.                            |
+| `httpEndpoint` / `btpEndpoint` | Where you dial, and which carriage: `wss://` is BTP, `https://` is ILP-over-HTTP. BTP wins where both are published.     |
+| `settlements[]`                | You need a chain **in common**. No overlap is a `502`.                                                                   |
+| `routes[].price`               | What their terminating route charges — the number your `--amount` has to cover. A decimal **string**, not a JSON number. |
 
 Addresses come back lowercased, so compare them case-insensitively against
 anything you derived yourself. Fields a node has nothing to say about are
@@ -775,7 +775,7 @@ volumes:
 
 networks:
   default:
-    name: connector_default     # the network `docker compose --profile evm` made
+    name: connector_default # the network `docker compose --profile evm` made
     external: true
 ```
 
@@ -905,7 +905,7 @@ wrong:
 - **`--amount` is the path's cost**, not the route's price: every hop's fee plus
   the terminating price. 100 + 1000 = 1100. One unit short and the packet comes
   back `REJECT F03 -- claim rejected: advances value by 999, less than this
-  route's price of 1000`.
+route's price of 1000`.
 
 `--expect-fulfill` is what makes this a test rather than a report: without it a
 `REJECT` is printed and the process still exits 0.
@@ -1131,19 +1131,19 @@ empty tier** — no machines, no mainnet contracts, no keys.
 
 ## Where to go next
 
-| Path                                                                         | What it is                                                                                  |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| [`docs/the-yellow-brick-road.md`](docs/the-yellow-brick-road.md)             | **The idea.** Why you pay a path and not a destination, and why the road earns the traffic. |
-| [`docs/rfcs/`](docs/rfcs/README.md)                                          | **The protocol.** Interledger, the ten vendored RFCs, and where TOON departs from each.     |
-| [`docs/protocol/configuration-spec.md`](docs/protocol/configuration-spec.md) | Every config key, and what each one binds.                                                  |
-| [`docs/protocol/operator-spec.md`](docs/protocol/operator-spec.md)           | The operator surface's rules, numbered.                                                     |
-| [`docs/protocol/self-description-spec.md`](docs/protocol/self-description-spec.md) | What `GET /ilp` must and must not carry, rule by rule.                                |
-| [`docs/operators/`](docs/operators/)                                         | Runbooks: box bring-up, key rotation, fleet release and health, signing a write.            |
-| [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md)         | The container path in full, including the image tag table.                                  |
-| [`local/`](local/README.md)                                                  | The shipped image against real chains — `make local-verify`.                                |
-| [`CONTEXT.md`](CONTEXT.md)                                                   | The vocabulary. Read before writing docs or naming anything.                                |
-| [`docs/adr/`](docs/adr/README.md)                                            | Why any of this is the way it is. The tiebreaker for everything.                            |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md)                                         | Building from source, the test gate, the chain binaries it needs.                            |
+| Path                                                                               | What it is                                                                                  |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [`docs/the-yellow-brick-road.md`](docs/the-yellow-brick-road.md)                   | **The idea.** Why you pay a path and not a destination, and why the road earns the traffic. |
+| [`docs/rfcs/`](docs/rfcs/README.md)                                                | **The protocol.** Interledger, the ten vendored RFCs, and where TOON departs from each.     |
+| [`docs/protocol/configuration-spec.md`](docs/protocol/configuration-spec.md)       | Every config key, and what each one binds.                                                  |
+| [`docs/protocol/operator-spec.md`](docs/protocol/operator-spec.md)                 | The operator surface's rules, numbered.                                                     |
+| [`docs/protocol/self-description-spec.md`](docs/protocol/self-description-spec.md) | What `GET /ilp` must and must not carry, rule by rule.                                      |
+| [`docs/operators/`](docs/operators/)                                               | Runbooks: box bring-up, key rotation, fleet release and health, signing a write.            |
+| [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md)               | The container path in full, including the image tag table.                                  |
+| [`local/`](local/README.md)                                                        | The shipped image against real chains — `make local-verify`.                                |
+| [`CONTEXT.md`](CONTEXT.md)                                                         | The vocabulary. Read before writing docs or naming anything.                                |
+| [`docs/adr/`](docs/adr/README.md)                                                  | Why any of this is the way it is. The tiebreaker for everything.                            |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md)                                               | Building from source, the test gate, the chain binaries it needs.                           |
 
 ## License
 
