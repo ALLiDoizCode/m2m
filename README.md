@@ -530,6 +530,12 @@ A peering still referenced by a runtime route is refused until the route goes.
 > settlement address derived by hand beforehand. `local/two-hop/` is a worked pair
 > of those files. Config always wins a collision: it refuses the runtime write
 > outright rather than shadowing it.
+>
+> It also changes what the far side sends back. Only a node whose **own** config
+> declares those tables mounts a peer carriage, so a runtime peering is answered
+> by the counterparty's ordinary client edge — which is why the refusals quoted
+> below are `402` and `F03` rather than the peer carriage's `F06`
+> ([`peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md) §3.1).
 
 ### Try it locally: two connectors, one packet, one chain
 
