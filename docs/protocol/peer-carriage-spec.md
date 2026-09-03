@@ -651,8 +651,8 @@ additively extensible) and MUST NOT be emitted.
 
 - **The ILP packets themselves are unchanged**, byte for byte, on both carriages: the same OER
   encodings `POST /ilp` already carries (`client-edge-spec.md` §1.1), the same as the deleted peer
-  wire carried in its §2. `vectors/wire-vectors.json`'s existing envelope, condition and fulfilment
-  sections were never peer-specific and are not re-derived here.
+  wire carried in its §2. `vectors/wire-vectors.json`'s existing envelope and fulfilment sections
+  were never peer-specific and are not re-derived here.
 - **ADR 0024's EIP-712 `BalanceProof` digest is untouched**, on both carriages. A peer claim signs
   exactly the digest `connector_signer::evm_balance_proof_digest` produces today, over exactly the
   fields the deployed `TokenNetwork.sol` typehash requires, `lockedAmount`/`locksRoot` included and
@@ -1128,12 +1128,15 @@ between a **peer hop** and a **termination**, because the two carriages make it 
 - A forwarding connector MUST NOT derive a fulfilment. ADR 0019's derivation is a **termination-only**
   capability; issue #417's rule — a connector never produces a fulfilment itself — stands unchanged
   for every forwarding hop, on both carriages.
-- A forwarding connector MUST verify `sha256(fulfillment) == executionCondition` on every FULFILL it
-  relays upstream, **before** treating the packet as fulfilled for its own claim accounting
-  (`peer-semantics-pre-868.md` §3.1). This is what makes the far end's derivation safe to rely on without
-  opening anything: a hop is paid only against a preimage it cannot forge.
-- `peer-semantics-pre-868.md` §3.1's other rule is unchanged on both carriages: an absent or all-zero
-  `executionCondition` is `F01`, with no derived-preimage fallback.
+- **A forwarding connector relays a downstream FULFILL unchecked** (issue #1269,
+  [ADR 0069](../adr/0069-the-execution-condition-leaves-the-wire.md)). The PREPARE carries no
+  execution condition and there is no field left to verify a candidate fulfilment against: a hop
+  is paid on arrival (ADR 0042) regardless of what the FULFILL it relays turns out to contain, so
+  the check `peer-semantics-pre-868.md` §3.1 once required here protected nothing this hop owns.
+  The sender's own end-to-end check — comparing the fulfilment that comes back against
+  `derive_fulfillment` of its own sealed secret — is what a forged delivery actually meets.
+  `peer-semantics-pre-868.md` §3.1's F01-on-missing-condition rule is retired the same way: there is
+  no condition for a PREPARE to omit.
 
 ### 8.2 A termination reached over a peering
 
@@ -1660,8 +1663,9 @@ and carries, without restating,
 [ADR 0019](../adr/0019-a-terminating-connector-derives-the-fulfilment.md),
 [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md),
 [ADR 0023](../adr/0023-oer-length-determinants-are-canonical.md),
-[ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md) and
-[ADR 0025](../adr/0025-an-envelope-target-is-confined-beneath-the-handler-path.md).
+[ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md),
+[ADR 0025](../adr/0025-an-envelope-target-is-confined-beneath-the-handler-path.md) and
+[ADR 0069](../adr/0069-the-execution-condition-leaves-the-wire.md).
 
 It does not reintroduce raw-TCP framing, a `transport` selector, a peer-specific claim encoding, a
 quoting protocol, `lockedAmount`/`locksRoot`, the derived-preimage condition path, or a

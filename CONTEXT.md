@@ -65,14 +65,17 @@ _Avoid_: speaks ILPv4 (retired — it names the semantics and implies the bytes;
 is "ILPv4 semantics, TOON encoding")
 
 **Condition**:
-A commitment minted by the sender and carried on the packet, naming what will count as proof of
-delivery. Every packet carries a real one; a hop pays out only against something that satisfies it.
-_Avoid_: execution condition (when the layer is already clear), hashlock
+Retired from the wire (issue #1269, ADR 0069). A packet no longer carries one: it was a commitment
+minted by the sender, invariant across every hop and distinctive per packet — exactly the shape of
+a cross-hop join key, and it paid for nothing a hop was actually charged to check. What survives is
+the sender's own end-to-end check, over the fulfilment directly.
+_Avoid_: execution condition (as a thing a current packet carries), hashlock
 
 **Fulfilment**:
-What satisfies a packet's condition, and so the proof that the packet was delivered to its
-intended receiver. It proves delivery; it does not move value — a packet carries its own claim.
-At a route termination the terminating connector produces it; every hop upstream checks it.
+The proof that a packet was delivered to its intended receiver. It proves delivery; it does not
+move value — a packet carries its own claim. At a route termination the terminating connector
+derives it from the request's own sealed secret (ADR 0019); no hop upstream checks it any more
+(ADR 0069) — only the sender does, against that same derivation.
 _Avoid_: receipt, proof of payment, preimage (when the layer is already clear)
 
 **ILP address**:
@@ -199,8 +202,8 @@ _Avoid_: encryption (when the layer is already clear), wrapper, seal
 **Identity key**:
 The key that names a connector to everyone outside it. A sender seals to it, so it is what makes a
 packet deliverable at all; and because a fulfilment derives from what it opens, it is load-bearing
-for payment and not only for confidentiality. Rotating it invalidates conditions already minted
-against the old one.
+for payment and not only for confidentiality. Rotating it invalidates the fulfilment a sender's own
+end-to-end check expects for anything already sealed to the old one.
 
 **Packet plane**:
 The part of a connector on the path of every packet — routing, claim handling, forwarding.
@@ -268,10 +271,10 @@ machines the operator does not control.
 _Avoid_: client API, ingress
 
 **Vector**:
-A committed input/output pair — an encoded packet, a wrapped packet, an envelope, a condition, the
-fulfilment it derives — that every implementation replays as its own suite. Vectors are generated from the
-properties, never captured from whatever an implementation happened to emit, and reproducing them
-is what conformance means. Prose describing the wire is not normative; these are.
+A committed input/output pair — an encoded packet, a wrapped packet, an envelope, a shared secret,
+the fulfilment it derives — that every implementation replays as its own suite. Vectors are generated
+from the properties, never captured from whatever an implementation happened to emit, and reproducing
+them is what conformance means. Prose describing the wire is not normative; these are.
 _Avoid_: fixture, golden file, test case (when the cross-repo contract is what is meant)
 
 **Peer wire** _(retired term, [ADR 0027](docs/adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md), issue #679)_:

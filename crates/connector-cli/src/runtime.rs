@@ -2703,15 +2703,15 @@ btp_endpoint = "wss://apex.example/ilp/btp"
         let runtime = build(&config).await.expect("build");
         let app = router(&runtime, &config).expect("router");
 
-        // A well-formed, zero-amount PREPARE with an all-zero execution
-        // condition, addressed to this node's own configured address --
-        // exactly the shape a client with no other way to learn
-        // `ilpAddresses`/`btpEndpoint` sends when probing the edge it can
-        // reach but has never bootstrapped against.
+        // A well-formed, zero-amount, `greeting`-flagged PREPARE addressed
+        // to this node's own configured address -- exactly the shape a
+        // client with no other way to learn `ilpAddresses`/`btpEndpoint`
+        // sends when probing the edge it can reach but has never
+        // bootstrapped against.
         let prepare = connector_domain::Prepare {
             amount: 0,
             expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
-            execution_condition: [0u8; 32],
+            greeting: true,
             destination: "g.toon.apex".to_string(),
             data: Vec::new(),
         };
@@ -2786,7 +2786,7 @@ btp_endpoint = "wss://apex.example/ilp/btp"
         connector_domain::Prepare {
             amount: 0,
             expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
-            execution_condition: [1u8; 32],
+            greeting: false,
             destination: "g.example.unmatched".to_string(),
             data: Vec::new(),
         }
@@ -4138,7 +4138,7 @@ key_file = "{key_file}"
         use axum::routing::post;
         use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine;
-        use connector_domain::{derive_condition, Fulfill, PacketResponse, Prepare};
+        use connector_domain::{Fulfill, PacketResponse, Prepare};
         use connector_runtime::{
             ClaimAckOutcome, ClaimSignature, FakeAppClient, PeerForward, PeerTransport, WireClaim,
         };
@@ -4256,9 +4256,10 @@ key_file = "{key_file}"
         }
 
         /// A real [`PeerTransport`] that fulfils every forward and keeps
-        /// what rode with it. The fulfilment matches the condition
-        /// [`peer_bound_prepare`] sets, so the forward genuinely fulfils
-        /// and the postpay path's `record_fulfillment` genuinely runs.
+        /// what rode with it -- so the forward genuinely fulfils and the
+        /// postpay path's `record_fulfillment` genuinely runs. Its
+        /// fulfilment rides home unchecked (issue #1269 / ADR 0069), so it
+        /// need not derive from anything [`peer_bound_prepare`] sets.
         struct RecordingPeerTransport {
             fulfillment: [u8; 32],
             forwards: Mutex<Vec<(String, Prepare, Option<WireClaim>)>>,
@@ -4318,11 +4319,11 @@ key_file = "{key_file}"
             }
         }
 
-        fn peer_bound_prepare(fulfillment: &[u8; 32]) -> Prepare {
+        fn peer_bound_prepare() -> Prepare {
             Prepare {
                 amount: CLIENT_AMOUNT,
                 expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
-                execution_condition: derive_condition(fulfillment),
+                greeting: false,
                 destination: DESTINATION.to_string(),
                 data: b"a forwarded packet's payload".to_vec(),
             }
@@ -4481,9 +4482,7 @@ client_edge_url = "{url}"
             let peer = RecordingPeerTransport::new();
             let connector = connector(&fixture, Arc::clone(&peer));
 
-            let response = connector
-                .handle_prepare(peer_bound_prepare(&peer.fulfillment))
-                .await;
+            let response = connector.handle_prepare(peer_bound_prepare()).await;
 
             assert!(
                 matches!(response, PacketResponse::Fulfill(_)),
@@ -4750,9 +4749,7 @@ client_edge_url = "{client_edge_url}"
                 .expect("the fixture configures [settlement.solana]")
                 .public_key();
 
-            let response = connector
-                .handle_prepare(peer_bound_prepare(&peer.fulfillment))
-                .await;
+            let response = connector.handle_prepare(peer_bound_prepare()).await;
 
             assert!(
                 matches!(response, PacketResponse::Fulfill(_)),

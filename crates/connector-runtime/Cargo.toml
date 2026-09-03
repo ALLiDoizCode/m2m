@@ -19,6 +19,12 @@ bs58 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 percent-encoding = "2"
 prometheus = "0.13"
+# Mints a per-packet log correlation id (ADR 0014, amended by issue #1269 /
+# ADR 0069): the id used to be the packet's own execution condition, free
+# because it was already invariant across every hop; now that the condition
+# is gone, this hop mints its own random one instead, at the same version
+# `connector-signer` already pins for gift-wrap nonces.
+rand = "0.7"
 # `json`, for the outbound client ledger's `POST /ilp/claim-state` round
 # trip (issue #873): the receiver is asked for its watermark as JSON and
 # answers as JSON.
