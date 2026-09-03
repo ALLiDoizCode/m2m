@@ -273,13 +273,21 @@ same one.
 | Funding the key  | Base Sepolia ETH for gas; mock USDC from the [devnet faucet](https://faucet.devnet.toonprotocol.dev)                                                     | devnet SOL (`solana airdrop 1 <address> -u devnet`); mock USDC from the same faucet                                                                                             |
 | Full record      | [`packages/contracts/deployments/base-sepolia.md`](packages/contracts/deployments/base-sepolia.md)                                                       | [`packages/solana-program/deployments/devnet-public.md`](packages/solana-program/deployments/devnet-public.md)                                                                  |
 
-There is no Solana _testnet_ deployment — the program is on devnet and nowhere
-else — and no mainnet on either chain. No EVM mainnet carries a `TokenNetwork` or
-a token for a registry to resolve, so `contract_address` has nothing to point at;
-and because a Solana claim's signed message binds the settlement program, a node
-pointing `[settlement.solana]` at a mainnet RPC while naming the devnet program
-id would take money for claims it can never redeem. Production is a **named,
-empty tier** ([ADR 0056](docs/adr/0056-production-is-a-named-empty-tier.md)), and
+There is no Solana _testnet_ deployment: the program is on devnet and on
+mainnet-beta, nowhere else. **Mainnet exists on both chains**, deployed by hand
+and used by one third-party operator's node, not by this repository's fleet:
+the Base mainnet contracts
+([`packages/contracts/deployments/base-mainnet.md`](packages/contracts/deployments/base-mainnet.md),
+2026-09-01) and the Solana mainnet-beta program
+([`packages/solana-program/deployments/mainnet-beta.md`](packages/solana-program/deployments/mainnet-beta.md),
+2026-08-14, upgraded in place 2026-08-29). The devnet table above is what the
+fleet and the faucet serve; a node on mainnet funds itself. Because a Solana
+claim's signed message binds the settlement program, a node pointing
+`[settlement.solana]` at a mainnet RPC while naming the devnet program id would
+take money for claims it can never redeem: take the program id from the mainnet
+record. The fleet's production tier is still a **named, empty tier**
+([ADR 0056](docs/adr/0056-production-is-a-named-empty-tier.md)): no fleet
+machine, no fleet key, and
 [`connector.production.toml`](deploy/connector-rust/connector.production.toml) is
 a skeleton in which every value fails to load on purpose. Do not fill it in.
 
@@ -1124,8 +1132,10 @@ the binary and a box's mounted TOML are a matched pair in both directions,
 bump that pin.
 
 **Devnet** settles on Base Sepolia and Solana devnet; test funds come from the
-[devnet faucet](https://faucet.devnet.toonprotocol.dev). **Production is a named,
-empty tier** — no machines, no mainnet contracts, no keys.
+[devnet faucet](https://faucet.devnet.toonprotocol.dev). **Mainnet** contracts and
+program exist on Base and Solana mainnet-beta (records under
+`packages/*/deployments/`), run by a third-party operator. **The fleet's production
+tier is still named and empty** (ADR 0056): no fleet machine, no fleet key.
 
 ---
 

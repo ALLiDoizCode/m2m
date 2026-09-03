@@ -110,10 +110,43 @@ solana program show 8e7BhzydH1EqL486tw6Lp99BXviH3i5JN8qNpMSNmHj3 --url https://a
 Confirms `executable`, owner `BPFLoaderUpgradeab1e...`, data length 136,770, and the upgrade
 authority above.
 
-## What this deployment does not yet mean
+## Since deployment (last updated 2026-09-03)
 
-- **No channel has been opened against this program.** Nothing has settled on Solana mainnet.
-- **No node is configured to use it yet.** `[settlement.solana]` on every node still points at
-  devnet.
-- **Soak has not started.** Per toon-meta's soak criteria a family's clock cannot begin until
-  every lifecycle path has one live observation, and no channel has been closed on any chain.
+The section that used to close this file said no channel had been opened against this program, no
+node was configured to use it, and no channel had been closed on any chain. All three were true on
+2026-08-14 and false by the time the record merged on 2026-09-03. What happened, all on this
+program id, all re-read from `https://api.mainnet-beta.solana.com` on 2026-09-03:
+
+| Date       | Event                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Evidence                                                                 |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 2026-08-14 | First channel opened and funded with 5 USDC by a third-party operator's client against its own node: `DcW6wGmZChYD674SnibLYwMJSWzdR4rYwrgq5ecc8efz`, vault `AHNgAKW4S6TBxHYQMv2wWZiUATqKGJh7XaSFNxr4JwbG`, challenge window 3600 s                                                                                                                                                                                                                                                                                                                                                | account owner is this program, 178 bytes, still open                     |
+| 2026-08-15 | Full lifecycle on that channel, signed by the payer alone: `ClaimFromChannel` (nonce 1, 1,000 units) `3Aeoj2C8WZE7CM6PPBawYUkd1ijXZvMBNdipYyCsDLtBtqPDryoDWHyL2uMwSGCCB8Z6AmfUiDmDF2GUaErA5mFM`, `CloseChannel` `4s3sFwKSdNty4YjwRNje2R5UQ4YiawR2dpaDkWVx9Yy7H38xGSrL4DBCbmHHnMNg9gNiE7bx4Rwpm2QpR3abedJU`, `SettleChannel` `SD4czZTRyy8KLZk6W5zXiDucZhK3ZXGP3DVmGYpEe9T1DdEwcKhs9M9E8ky7DNtu8F4RvpFpxPdVoCujzUts7EW` (A=1,000, B=4,999,000). The first claim redeemed on chain on any TOON settlement family. The channel was then reopened at the same PDA, which surfaced #977 | all three Finalized                                                      |
+| 2026-08-16 | First peer channel on any TOON connector, edge to store, 2 USDC: `27XcKjUVe3SbVfkrj72bqMcZf3QuEasGxci4kberf8fu`, tx `F9VnMj7FrMvsv7CBSrKaU9UMpGGZfbdhPvEQCasLc24hGjLTFv1fox4mmu3aqNzATiNsGsonJFUa7GKEHTecAdP`                                                                                                                                                                                                                                                                                                                                                                     | account owner is this program                                            |
+| 2026-08-29 | Both outstanding V1 claims redeemed, then the program **upgraded in place to the ADR 0053 / #1082 balance-proof V2 build** (tx `Bys6wM3vWWLqVFWU2Wtwn4GjU3YitgR1EueCMd1sC48vUNHcmXcTG81apWbu7UmbP6fgXnvQJBxfMqQSgSrnsTY`, slot 442712107). Same program id, same authority, `max_len` and rent unchanged. Simulated A/B after the upgrade: a 96-byte V2 claim accepted, a 48-byte V1 claim rejected `Custom:8`                                                                                                                                                                    | `solana program show` reads Last Deployed In Slot 442712107; bytes below |
+| 2026-08-29 | Both V2 claims redeemed through the operator surface (`POST /channels/:id/redeem-latest`): `DcW6wGmZ…` nonce_b 20 / transferred_b 500,000; `27XcKjUV…` nonce_a 9 / transferred_a 243,600                                                                                                                                                                                                                                                                                                                                                                                          | chain read-back                                                          |
+| 2026-09-01 | The same node moved `[settlement.evm]` to Base mainnet with this Solana leg unchanged, the first connector settling on two mainnets                                                                                                                                                                                                                                                                                                                                                                                                                                               | `packages/contracts/deployments/base-mainnet.md`                         |
+| 2026-09-03 | First kind:5096 gas-station jobs on mainnet, paid over `DcW6wGmZ…` (claim nonces into the 50s); one execute tx `4SuuVx7ZLmuEMZ22LYUrJGSpkMcPvNFFczWqMybNovECd95JYZ3ijyTsgPXdgPXz33dyhULd3cWWpNVNzj5eU6Un`                                                                                                                                                                                                                                                                                                                                                                         | Finalized                                                                |
+
+### The bytes on chain are no longer the 2026-08-14 build
+
+The "Binary" and "Reproducibility" sections above describe the V1 build that was deployed on
+2026-08-14 (109,416 bytes, `57619b30…`). Since the 2026-08-29 upgrade the program data is the V2
+build of `deded9f9`:
+
+```
+solana program dump 8e7BhzydH1EqL486tw6Lp99BXviH3i5JN8qNpMSNmHj3 onchain.so --url https://api.mainnet-beta.solana.com
+head -c 109400 onchain.so | shasum -a 256
+```
+
+yields `c87cf232f211bb226b6960d164121b6ed728e8586e74eadd4676c6e02a1c8cbb` (re-run 2026-09-03), with
+every byte past 109,400 zero. The `max_len` of 136,770 bytes from the initial deploy absorbed the
+upgrade without `solana program extend`.
+
+### Still not observed on this program
+
+- Cooperative close. Close, claim-redeemed and rescue have each run once (2026-08-15).
+- A second operator. Every channel above belongs to one operator's client, edge and store, so peer
+  fees are circular and the observations prove routing and charging, not that anyone else earned.
+- Soak: per toon-meta's soak criteria a family's clock cannot begin until every lifecycle path has
+  one live observation, and the amendment admitting mainnet observations (toon-meta#395) has
+  closed, so the remaining gap on this chain is coop-close alone.
