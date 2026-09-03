@@ -18,7 +18,22 @@ services:
     # same image, same env, same healthcheck. The relay app itself is
     # unmodified by this move; only which box it runs on (and which
     # connector fronts it) changes.
-    image: ghcr.io/toon-protocol/relay:sha-d80f279
+    # `:release` (relay#131, toon-meta#403), watched by
+    # ./docker-compose.relay.watchtower.yml: the relay repo's image publish
+    # moves this tag on every green merge to `main`, and Watchtower recreates
+    # this container when its digest does. Auto-on-green rather than the
+    # connector's supervised promotion tag -- the owner's own trade-off note
+    # on toon-meta#403 -- and safe on this box only since the nginx upstream
+    # in front of it re-resolves per request (issue #993); against the literal
+    # `proxy_pass` this box used to carry, every relay merge would have 502'd
+    # the edge until a manual reload. Immutable `sha-*` tags stay in GHCR for
+    # a manual rollback.
+    image: ghcr.io/toon-protocol/relay:release
+    # Label-scoped Watchtower watch target: ./docker-compose.relay.watchtower.yml's
+    # `--label-enable` Watchtower only ever touches a container carrying this
+    # exact label.
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
     environment:
       TOON_OBLIVIOUS_MODE: 'true'
       TOON_BLS_PORT: '3100'

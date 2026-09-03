@@ -7,6 +7,26 @@ and an authenticated `GET /metrics`.
 
 All commands below run from the repository root.
 
+## Two templates live here
+
+| File                        | For                                                                                                                                                                    |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `connector.toml`            | **This walkthrough.** Fill it in and run a node. Its placeholders are invalid on purpose so a half-edited file refuses to start rather than starting wrong (ADR 0009). |
+| `connector.production.toml` | **A skeleton for a tier that does not exist.** Do not fill it in. It documents what standing production up would require, and every value in it is invalid on purpose. |
+
+The second one needs a word of warning, because it looks like the first. There
+is no production tier: no machine, no mainnet contract, no key, no deploy
+([ADR 0056](../../docs/adr/0056-production-is-a-named-empty-tier.md)). Two of
+its settings cannot be filled in even in principle — `packages/contracts` has
+never been deployed to an EVM mainnet, so there is no `TokenNetworkRegistry`
+to name, and the Solana payment-channel program
+(`2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`) exists on devnet only, which
+matters because ADR 0053 binds the settlement program into a claim's signed
+message. Copying a devnet address across to "make it valid" produces a node
+that boots, looks healthy, and cannot redeem a claim.
+`crates/connector-bin/tests/production_skeleton_is_inert.rs` fails the build if
+that happens.
+
 ## Pulling the published image
 
 `.github/workflows/publish-connector-rust-image.yml` publishes this image to
@@ -22,32 +42,78 @@ workflow header for why the Rust binary reclaimed the canonical name.
 
 Tags:
 
-| Tag                    | Meaning                                                                                                                                              |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rust-sha-<short-sha>` | Immutable — pins the exact commit the binary was built from. Use this for any deployment that needs a reproducible pin (e.g. #490's devnet overlay). |
-| `rust-main`            | Floating — always the most recent build off `main`. Convenience only; do not pin a deployment to it.                                                 |
+| Tag                    | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rust-sha-<short-sha>` | Immutable — pins the exact commit the binary was built from. Use this for any deployment that needs a reproducible pin (e.g. #490's devnet overlay).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `rust-main`            | Floating — always the most recent build off `main`. Convenience only; do not pin a deployment to it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `rust-release`         | Floating, and **not a build output** — historically a PROMOTION tag, moved only by an explicit `promote-to-fleet.yml` dispatch after checking it still booted both devnet boxes' committed `connector-rust.toml`. [ADR 0068](../../docs/adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md) retired that mechanism: neither devnet box deploys the connector from this repository any more, so nothing here moves this tag — it is frozen at whatever digest it last held. A node repository that adopts a build now pins `rust-sha-<short-sha>` or a release's `rust-<handle>` alias in its own `deploy/` bundle instead. It is still deliberately **not** pushed by the publish workflow: #990 made it move on every green `main` once, which made every merge an unvalidated deploy to the live client edge on two machines, and that is not a mistake worth repeating even with no promotion left to guard against it. See [ADR 0041](../../docs/adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md). |
+| `rust-2026.08.21.1`    | Immutable — a **release handle** alias for the `rust-sha-` digest a release was cut from, applied by [`release-connector.yml`](../../.github/workflows/release-connector.yml) and never moved. UTC date, then that day's ordinal. Deliberately not semver (see below). This is the tag a node repository pins to adopt a specific release — see [ADR 0055](../../docs/adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md) and [ADR 0068](../../docs/adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 There is no semver tag series here: no crate under `crates/` has a release
 process yet, and inventing one for the image alone would claim a stability
-contract the binary hasn't earned. Compare
-[`CONNECTOR_RELEASE_CONTRACT.md`](../../CONNECTOR_RELEASE_CONTRACT.md), which
-describes the semver/cosign contract the old TypeScript image had — that
-image is no longer published (4.0.0), and this one does not (yet) carry an
-equivalent contract.
+contract the binary hasn't earned. The retired TypeScript image had a
+semver/cosign contract; that image is no longer published, and this one does
+not (yet) carry an equivalent.
+
+The release handle is what a version number would otherwise have been, minus
+the promise: `2026.08.21.1` says when this state of the world was cut and in
+what order, and nothing about compatibility. [ADR 0055](../../docs/adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)
+is the record for the handle shape; its deploy-ordering mechanism
+(`config-change-required: true|false` on the release, read by
+`promote-to-fleet.yml`) is retired by
+[ADR 0068](../../docs/adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md) —
+a node repository now owns its own deploy ordering when it bumps its pin.
+`package.json`'s `"version": "3.3.0"` is TypeScript-era residue belonging to
+`packages/`, not this binary's version.
 
 ```bash
 docker pull ghcr.io/toon-protocol/connector:rust-sha-<short-sha>
 ```
 
-For a **whole stack** on one machine rather than a single node — connector,
-relay, a local `anvil` carrying the settlement topology, and a real paid write
-plus on-chain redeem end to end — see
-[`local-stack/README.md`](local-stack/README.md). That is a rehearsal, not a
-deployment: nothing in it is published or pinned, and every key in it is a test
-fixture.
+A `local-stack/` bundle used to sit here — the connector plus the published
+relay image plus a host `anvil`, driven end to end. It is deleted. It was
+app-layer by construction (its subject was a paid write landing on a _relay_),
+it pinned a relay image by sha that would rot, and its chain lived on the host
+behind a hand-run Python TCP forwarder because `anvil` binds loopback. Local
+composition of a connector with an app belongs in the app's own repository;
+this repo builds only the connector image. `git log --diff-filter=D --
+deploy/connector-rust/local-stack` if you need to read what it did.
+
+What replaced it is [`local/`](../../local/README.md), and the difference is
+the point: it is connector-layer only — the app behind its routes is the
+image's own `stub-app` — its chains are ordinary compose services the
+connector reaches by name, and it is a CI gate rather than a demonstration.
+`make local-verify LOCAL_TOPOLOGY=<solo|two-hop|mixed-chain>` builds this
+image, runs it against those chains, sends a real packet and asserts the
+outcome.
 
 Skip to [step 6](#6-run-it) to run it — the config/key setup in steps 1-4
 below is identical whether you built the image locally or pulled it.
+
+### Cutting a release
+
+One dispatch, and everything after it is automated — build, handle, image tags,
+GitHub Release:
+
+```bash
+gh workflow run release-connector.yml \
+  -f reason="claim-state fix, verified on the relay"
+```
+
+It is `workflow_dispatch` **only**, and must stay that way. A green merge to
+`main` reaches GHCR and stops there: the connector is the client edge on both
+devnet boxes, so one bad digest reaching either unreviewed takes that box's
+paid-write path dark (ADR 0041 Decision 3). Auto-on-green for this image
+shipped once (#990) and was reverted.
+
+**A release does not deploy.** It ends at the GitHub Release, which names the
+`rust-sha-<short-sha>` tag and its `rust-<handle>` alias. A node repository
+(`toon-protocol/relay`, `toon-protocol/store`) adopts a build by bumping its
+own pinned connector tag, in one place in its own `deploy/` bundle, as its own
+reviewed change ([ADR 0068](../../docs/adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)).
+That is also where the deploy ordering lives now: when a build needs a config
+key the box does not yet have, the node repo lands the config and bumps the pin
+in that order. `docs/operators/fleet-release-and-health.md` is the procedure.
 
 ## 1. Generate a signer key
 
@@ -76,14 +142,14 @@ this is the key the connector signs claims and settlement transactions with
 (ADR 0012), and it should stay readable by exactly one uid.
 
 This applies to the key file wherever it lives, under whatever name. The
-devnet overlays under `infra/linode-node/` and `infra/linode-store/` mount
+devnet overlays under `infra/linode-store/` and `infra/linode-relay/` mount
 `./signer-rust.key` rather than this directory's `signer.key` -- same
 generation, same `chmod`, same `chown`, different path:
 
 ```bash
-openssl rand -hex 32 > infra/linode-node/signer-rust.key
-chmod 600 infra/linode-node/signer-rust.key
-chown 10001:10001 infra/linode-node/signer-rust.key
+openssl rand -hex 32 > infra/linode-store/signer-rust.key
+chmod 600 infra/linode-store/signer-rust.key
+chown 10001:10001 infra/linode-store/signer-rust.key
 ```
 
 ## 2. Generate an operator bearer token
@@ -98,6 +164,17 @@ openssl rand -hex 32
 
 Paste the output into `deploy/connector-rust/connector.toml`'s
 `operator.bearer_token`, replacing the `CHANGE-ME-...` placeholder.
+
+> **If the config you are writing will be committed, use the file form
+> instead** (issue #1003): write the token to a file, name it as
+> `bearer_token_file = "/app/data/operator-bearer-token"`, and bind-mount the
+> file at that path (`chmod 600`, `chown 10001:10001`). This quickstart's
+> `connector.toml` keeps the literal because it is a local template that
+> never holds a real token; every deployed config in this repo is public, and
+> a literal there is a credential in a public repository. Setting both forms
+> is refused at load — exactly one of them says where the token comes from.
+> See `infra/linode-store/connector-rust.toml`'s `[operator]` header for the
+> deployed shape.
 
 ## 3. Generate an operator write key
 
@@ -118,6 +195,13 @@ the file refuses to load until you do this). Keep `operator.pem` -- it is
 the private key an operator client signs writes with; nothing in this
 directory reads it automatically.
 
+> The file form is `write_keys_file = "/app/data/operator-write-keys"`, one
+> 64-hex public key per line with `#` comments (issue #1003). Public key
+> material, so this one is not about secrecy: ADR 0008 revokes write
+> authority by removing a key and restarting, and behind a file that is an
+> edit on the box rather than a pull request and a promotion. Use it for
+> anything deployed.
+
 ## 4. Edit the route(s)
 
 `connector.toml`'s `[[routes]]` block points at an example app
@@ -133,9 +217,22 @@ entry with a `wss://` or `https://` `endpoint` and a `credential`, a
 `[[peer_channels]]` row binding it to a channel, and a
 `[[routes]]` entry that names the peer's `id` instead of a `handler_url`.
 The template's commented peering block annotates every field. ADR 0027
-deleted the raw-TCP peer wire that preceded this (issue #679), along with
+deleted the raw-TCP transport that preceded this (issue #679), along with
 `peer_wire_addr` and the `SocketAddr`-shaped `[[peers]].addr`; a config
 still setting either now fails config load by name.
+
+**A `[[routes]]` entry naming a peer also needs a `[[pay_channels]]` row for
+that peer** (issue #1145). A connector covers every PREPARE it sends (ADR
+0042), and there is no longer an uncovered path for a forward to take, so a
+route to a peering with no channel to pay it from is refused at config load
+by name — the node does not start. A peering this node only _accepts_ on
+needs no such row; the requirement is keyed on the route.
+
+That key became required rather than optional, which by ADR 0009 makes it a
+**breaking deploy**: land the config carrying the row first, then move the
+image tag. Neither box on this fleet forwards to a peering today (issue
+#872 removed both peerings), so nothing deployed is affected — but the
+ordering rule holds the moment one is added back.
 
 Write the credential as a **`secret_file`**, not a literal:
 
@@ -188,7 +285,7 @@ backend to run it. Configure it and the node resolves the
 URL or a registry that does not answer `getTokenNetwork(token)` is an
 exit-1, not a runtime surprise. Only `chain = "evm"` is accepted today.
 
-`infra/linode-node/connector-rust.toml` carries a commented, annotated
+`infra/linode-store/connector-rust.toml` carries a commented, annotated
 `[settlement]` block to copy from; `crates/connector-bin/tests/devnet_configs_load.rs`
 boots exactly that block against a freshly deployed registry on anvil, so it
 is a template that is known to load.
@@ -250,7 +347,7 @@ and the node still starts, but every claim watermark it holds dies with the
 container — which is the whole of issue #605. In a compose file the equivalent
 is a `connector_rust_state:/app/state` entry under `volumes:` for the service,
 plus a top-level `volumes: { connector_rust_state: }` — see
-`infra/linode-node/docker-compose.node.rust.yml`.
+`infra/linode-store/docker-compose.store.rust.yml`.
 
 ## 7. Verify
 

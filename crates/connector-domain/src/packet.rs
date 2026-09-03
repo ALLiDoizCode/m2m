@@ -1,9 +1,49 @@
-//! ILPv4 packet types (RFC-0027) and their OER wire encoding (RFC-0030).
+//! ILPv4 packet types and their wire encoding: **RFC-0027's semantics in
+//! TOON's own encoding, which is not byte-compatible with it** (ADR 0063).
 //!
-//! Ported byte-for-byte from `packages/shared/src/types/ilp.ts` and
-//! `packages/shared/src/encoding/oer.ts` so a real ILPv4-over-HTTP client
-//! (RFC-0035) can address this connector's client edge and a Rust connector
-//! agrees on the wire with the existing TypeScript one.
+//! A packet these types produce will not decode in a conforming ILPv4
+//! implementation, and one from a conforming implementation will not decode
+//! here. Three things differ from RFC-0027 §Packet Format, and nothing else
+//! does:
+//!
+//! | RFC-0027                                                | This codec                                     |
+//! | ------------------------------------------------------- | ---------------------------------------------- |
+//! | Outer type-length wrapper: `type` then a VarOctetString | Type byte, then fields inline -- no wrapper    |
+//! | `amount` is a fixed `UInt64` (8 bytes)                  | `encode_var_uint` -- a VarUInt                 |
+//! | `expiresAt` is a 17-byte Interledger Timestamp          | 19-byte GeneralizedTime, `YYYYMMDDHHMMSS.fffZ` |
+//!
+//! Everything else here is RFC-0027's: the three type bytes (12, 13, 14), the
+//! field order and meanings, `condition = sha256(fulfilment)`, and the
+//! `F`/`T`/`R` error taxonomy. The OER primitives the fields are built from are
+//! RFC-0030's, tightened by ADR 0023 -- see `oer.rs`.
+//!
+//! **The bytes are pinned, not merely described.**
+//! `vectors/wire-vectors.json`'s `peer_carriage.prepare.http_body_hex` is a
+//! complete PREPARE in this dialect and `peer_carriage.fulfill_ack_accepted` /
+//! `reject_with_cost` carry the other two; `vectors/README.md` walks the
+//! PREPARE byte by byte. ADR 0021 makes those the cross-repo contract
+//! `toon-client`, `rig` and `swap` are held to, so a change to this file that
+//! does not regenerate them fails `cargo test --workspace`.
+//!
+//! ## Why the dialect exists, and why it stays
+//!
+//! These types were ported byte-for-byte from the TypeScript prototype's
+//! `packages/shared/src/types/ilp.ts` and `packages/shared/src/encoding/oer.ts`
+//! -- a **historical** citation: ADR 0017 retired that connector and the path
+//! no longer exists in this repository. That encoder had already diverged from
+//! RFC-0027, so porting it faithfully reproduced the divergence.
+//!
+//! The comment that stood here until ADR 0063 drew a false conclusion from that
+//! true premise: it said the port was so "a real ILPv4-over-HTTP client
+//! (RFC-0035) can address this connector's client edge". It does not follow
+//! from porting an encoder that was never conformant, nobody checked it, and
+//! three independent readings of this codebase took it at face value. Byte
+//! compatibility would not buy that property in any case -- ADR 0018 makes
+//! `data` a gift wrap sealed to the terminating connector's identity key and
+//! ADR 0019 derives the fulfilment from the secret inside it, so a conforming
+//! sender with perfect bytes still cannot build a packet this connector will
+//! pay out on. ADR 0063 has the other three reasons and the cost of changing
+//! it.
 
 use chrono::{DateTime, Utc};
 
@@ -182,14 +222,32 @@ impl RejectCode {
         RejectCode("F99".to_string())
     }
 
-    /// R00: Transfer Timed Out -- the packet's expiry has already passed.
+    /// R00: Transfer Timed Out -- the packet has run out of time here.
+    ///
+    /// Two cases, one fact. Its expiry has already passed on arrival
+    /// (`packet-flow-spec.md` PF-02), or it arrived alive but with no more
+    /// time left than the message window a hop must keep back to forward at
+    /// all (PF-19, [`crate::forwarded_expiry`]) -- the second is the first
+    /// one hop later, and neither is about this hop's fee, route or
+    /// configuration. Class-only under ADR 0051: the sender's move is a
+    /// fresh packet with more budget either way, so there is nothing for
+    /// the code to bind beyond its class.
     pub fn r00_transfer_timed_out() -> RejectCode {
         RejectCode("R00".to_string())
     }
 
-    /// R01: Insufficient Source Amount -- this hop cannot meet the
-    /// packet's declared minimum delivery once its own flat fee is taken
-    /// (ADR 0010, peer-wire-spec.md §4-5.1).
+    /// R01: Insufficient Source Amount -- RFC 0027's own definition, "the
+    /// amount received by a connector in the path was too little to forward
+    /// (zero or less)": this hop's flat fee alone exceeds what arrived, so
+    /// `amount_after_fee` yields nothing to pass on.
+    ///
+    /// This is the *standard* ILPv4 meaning and the only one. The
+    /// minimum-delivery meaning this code also carried -- "the amount minus
+    /// this hop's fee falls below the floor the sender declared" -- is
+    /// retired with the field itself (ADR 0057, issue #1143); the case
+    /// above is not, and is RFC 0027's `R01` rather than ADR 0051's `F03`,
+    /// whose row is about an amount wrong for a *price* the sender can pay.
+    /// Relative, not final, because the sender's move is to send more.
     pub fn r01_insufficient_source_amount() -> RejectCode {
         RejectCode("R01".to_string())
     }
@@ -216,10 +274,17 @@ impl RejectCode {
     }
 
     /// T04: Insufficient Liquidity (RFC-0027). Used until issue #424
-    /// (peer-wire-spec.md §5.1/§5.3) for this connector's own exposure
-    /// ceiling; that machinery is retired (ADR 0031, ADR 0033, issue #882)
-    /// and nothing in this codebase emits `T04` any more. Kept for wire
-    /// interop -- a standard ILPv4 code a counterparty may still send.
+    /// (peer-semantics-pre-868.md §5.1/§5.3) for this connector's own exposure
+    /// ceiling; that machinery is retired (ADR 0031, ADR 0033, issue #882).
+    ///
+    /// It is emitted again, for a different thing: ADR 0049's **cap**, the
+    /// largest amount this connector will forward to a given peer. A packet
+    /// over that cap is refused `T04` by `Connector::forward_to_peer`, and
+    /// the refusal's message carries the cap -- discovery is by this refusal
+    /// and nothing else, because clause 4 decided against publishing caps
+    /// (they would disclose who this node peers with and how far it trusts
+    /// each). Between #424 and the cap landing nothing emitted `T04`, and
+    /// this comment went on saying so; issue #1079 corrected it.
     pub fn t04_insufficient_liquidity() -> RejectCode {
         RejectCode("T04".to_string())
     }
@@ -255,16 +320,20 @@ impl RejectCode {
 /// `accumulated_cost` is the running total of what this packet's path has
 /// charged so far: the fees of every hop it actually passed through, plus
 /// the price of the route that terminates it, if it has reached one (ADR
-/// 0011, issue #523, `peer-wire-spec.md` §5.2) -- `0` when this connector
+/// 0011, issue #523, `peer-semantics-pre-868.md` §5.2) -- `0` when this connector
 /// originated the reject itself before forwarding or terminating the
 /// packet, since neither a fee nor a price applies to a hop the packet
 /// never used. It is a single sum -- never a per-hop breakdown, and never
 /// split between fees and price, since either would leak topology or
 /// pricing a probe has no need to know.
-/// Deliberately **not** part of this struct's OER wire encoding below: this
-/// type is ported byte-for-byte from RFC-0027 so an existing ILPv4-over-HTTP
-/// client can address this connector's client edge, and RFC-0027 has no such
-/// field. `accumulated_cost` instead rides beside the packet -- at the peer
+/// Deliberately **not** part of this struct's OER wire encoding below:
+/// RFC-0027 has no such field, and this codec's **field set** is faithfully
+/// the RFC's even though its byte layout is not (see this module's own doc and
+/// ADR 0063). Adding a field would be a departure of a larger and different
+/// kind from the three encoding ones -- every reader of the reject bytes,
+/// including ones this project does not write, would have to learn it, whereas
+/// the encoding divergences leave the field set intelligible.
+/// `accumulated_cost` instead rides beside the packet -- at the peer
 /// wire's frame level, or the client edge's `TOON-Accumulated-Cost` response
 /// header (`docs/protocol/client-edge-spec.md` §1.6) -- never inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,7 +525,7 @@ mod tests {
         assert_eq!(Reject::decode(&encoded).expect("decode"), reject);
     }
 
-    /// ADR 0011 / peer-wire-spec.md §5.2: `accumulated_cost` rides beside the
+    /// ADR 0011 / peer-semantics-pre-868.md §5.2: `accumulated_cost` rides beside the
     /// packet (frame level / response header), never inside RFC-0027's own
     /// REJECT encoding -- so a nonzero value never survives an encode/decode
     /// round trip through this struct's wire format alone.
@@ -484,9 +553,9 @@ mod tests {
         assert_eq!(RejectCode::t04_insufficient_liquidity().as_str(), "T04");
         assert_eq!(RejectCode::t05_rate_limited().as_str(), "T05");
         assert_eq!(RejectCode::f00_bad_request().as_str(), "F00");
-        assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");
         assert_eq!(RejectCode::r00_transfer_timed_out().as_str(), "R00");
+        assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f03_invalid_amount().as_str(), "F03");
     }
 }

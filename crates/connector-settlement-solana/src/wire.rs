@@ -94,18 +94,37 @@ pub fn pack_claim_from_channel(nonce: u64, transferred_amount: u64) -> Vec<u8> {
     data
 }
 
-/// The 48-byte balance-proof message the deployed program's Ed25519
-/// precompile check verifies: `channel_pda || nonce (LE) ||
-/// transferred_amount (LE)` (`processor.rs:892-897`).
+/// The domain tag every balance-proof message begins with (ADR 0053, issue
+/// #1082). Defined here rather than imported because this crate does not
+/// depend on `connector-signer`; it MUST stay byte-identical to
+/// `connector_signer::SOLANA_BALANCE_PROOF_DOMAIN_TAG` and to the program's
+/// own `BALANCE_PROOF_DOMAIN_TAG`. The committed
+/// `peer_carriage.claim_solana` vector is what keeps all three in step.
+const BALANCE_PROOF_DOMAIN_TAG: &[u8; 16] = b"TOON-BALPROOF-V2";
+
+/// The 96-byte balance-proof message the deployed program's Ed25519
+/// precompile check verifies (ADR 0053, issue #1082):
+/// `domain tag || program_id || channel_pda || nonce (LE) ||
+/// transferred_amount (LE)`.
+///
+/// **This must stay byte-identical to
+/// [`connector_signer::solana_balance_proof_message`] and to the program's
+/// own `expected_message`.** Three copies of one format is two too many, and
+/// they are kept in step by `connector-vectors`' committed
+/// `peer_carriage.claim_solana` entry, which every one of them is checked
+/// against.
 pub fn balance_proof_message(
+    program_id: &Pubkey,
     channel_pda: &Pubkey,
     nonce: u64,
     transferred_amount: u64,
-) -> [u8; 48] {
-    let mut message = [0u8; 48];
-    message[0..32].copy_from_slice(channel_pda.as_ref());
-    message[32..40].copy_from_slice(&nonce.to_le_bytes());
-    message[40..48].copy_from_slice(&transferred_amount.to_le_bytes());
+) -> [u8; 96] {
+    let mut message = [0u8; 96];
+    message[0..16].copy_from_slice(BALANCE_PROOF_DOMAIN_TAG);
+    message[16..48].copy_from_slice(program_id.as_ref());
+    message[48..80].copy_from_slice(channel_pda.as_ref());
+    message[80..88].copy_from_slice(&nonce.to_le_bytes());
+    message[88..96].copy_from_slice(&transferred_amount.to_le_bytes());
     message
 }
 

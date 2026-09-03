@@ -60,7 +60,12 @@ async fn a_racing_redeem_that_reverts_on_chain_is_reported_as_an_explicit_error(
         .open(counterparty, Duration::seconds(3600))
         .await
         .expect("open");
-    backend.fund(&channel, 1_000).await.expect("fund");
+    // The counterparty signs the claim below, so it is their side that has
+    // to hold the collateral (issue #1118).
+    backend
+        .fund_counterparty(&channel, 1_000)
+        .await
+        .expect("fund the counterparty's side");
 
     let claim = || {
         let proof = EvmBalanceProof {

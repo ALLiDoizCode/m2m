@@ -1,5 +1,7 @@
 # Peer-wire claims sign the EIP-712 balance-proof digest, not a connector-internal SHA-256 tuple
 
+**Status:** Accepted. Its own inline note already records that `SettlementChannel.sol` was deleted (#578, #589) and `connector-settlement-evm` retargeted at the deployed `TokenNetwork`. `connector_domain::claim_digest` is gone from `crates/`, as this record required. **Disturbed by [0059](0059-a-channel-is-derived-from-its-participants.md)** — the channel identifier a claim binds becomes derivable from the participants; what a claim signs is unchanged, but the vectors move.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 `ClaimBook` (`crates/connector-runtime/src/claim.rs`) now signs and verifies every EVM peer-wire
@@ -19,7 +21,7 @@ second answer to the same question.
 
 ## The disagreement this records
 
-`docs/protocol/peer-wire-spec.md` §3.5 already said, before this issue, that an `evm` claim's
+`docs/protocol/peer-semantics-pre-868.md` §3.5 already said, before this issue, that an `evm` claim's
 signature is _"ECDSA over the EIP-712 balance-proof digest"_. The implementation disagreed with
 its own specification: `ClaimBook::record_fulfillment`/`accept_inbound` signed and verified a
 SHA-256 tuple instead. This was invisible because nothing had ever redeemed a peer-wire claim on
@@ -45,6 +47,21 @@ unchanged by this issue.
   with none configured produces or accepts no claim at all, exactly like a node with no signer
   configured never emits one. This is what lets this change land, and be reviewed, independently of
   #576's settlement backend retarget.
+
+  > **Amended by #1136, decision unchanged.** The domain is still a configured input, per channel,
+  > and is still not _read_ from a settlement backend. It is now **corroborated** against one:
+  > `connector_cli::runtime`'s `check_evm_channel_domains` holds every declared
+  > `[[peer_channels]]`, `[[pay_channels]]` and `[[client_channels]]` domain against the
+  > `TokenNetwork` `EvmSettlementBackend::connect` resolved, and a disagreement refuses the boot.
+  > Until then nothing compared the two at all, so a row left stale after a redeploy produced a
+  > node that accepted claims under one `TokenNetwork` while redeeming through another — silent,
+  > and in the paying direction. Deriving the value instead was rejected: it would contradict this
+  > clause, and it would leave one source with no cross-check, so a mistyped `[settlement.evm]
+token_address` would silently re-domain every channel rather than being caught. The model is
+  > `[settlement.evm] decimals` (#564), which is likewise declared in config and refused at connect
+  > when the chain disagrees — not the Solana `program_id` removals (#981/#1082/#1128), which
+  > deleted a copy of a value the same file already stated.
+
 - **The channel id a claim signs over must already be the on-chain `bytes32`.**
   `ClaimBook::set_channel_domain` parses the configured channel id as either `0x`-prefixed (or
   bare) 64-character hex -- `TokenNetwork.sol`'s own `channelId` shape -- or a plain decimal

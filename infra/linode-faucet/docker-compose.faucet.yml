@@ -6,9 +6,10 @@
 # not a node on the network, so it has no `[[peers]]` row naming it anywhere,
 # no signer key, no settlement key, no state directory, no payment channel.
 #
-# USDC only (§4.6): the local-anvil EVM leg and the native-SOL/native-MINA legs
-# are retired from the faucet app itself (packages/faucet/src/index.js); this
-# box's env below configures only the surviving USDC-only legs.
+# USDC only (§4.6): the local-anvil EVM leg and the native-SOL leg are retired
+# from the faucet app itself (packages/faucet/src/index.js), and the Mina leg
+# left with Mina (ADR 0065). This box's env below configures only the two
+# surviving USDC legs, Base Sepolia and Solana devnet.
 #
 # Run from the CONNECTOR REPO ROOT:
 #   docker compose -f infra/linode-faucet/docker-compose.faucet.yml up -d
@@ -16,9 +17,9 @@
 
 services:
   faucet:
-    # Build context is the REPO ROOT (not packages/faucet): the multi-stage
-    # Dockerfile builds the mina-zkapp ESM bundle the USDC mint path imports,
-    # so it needs packages/mina-zkapp/ in context. See packages/faucet/Dockerfile.
+    # Build context is the REPO ROOT (not packages/faucet): the Dockerfile
+    # COPYs packages/faucet/ by its repo-relative path. See
+    # packages/faucet/Dockerfile.
     build:
       context: ../..
       dockerfile: packages/faucet/Dockerfile
@@ -26,33 +27,17 @@ services:
       PORT: 3500
       # ── Solana — public devnet, USDC only ──────────────────────────────
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
-      SOLANA_USDC_MINT: ${SOLANA_USDC_MINT:-xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in}
+      # This box's OWN mint, created by ./create-devnet-usdc-mint.sh with the
+      # treasury below as its authority — so the leg MINTS on demand and can
+      # never run dry. No default: a box must name the mint it can actually
+      # mint, and inheriting another box's would be a leg that 503s with an
+      # authority mismatch. Unset → the Solana leg is disabled.
+      SOLANA_USDC_MINT: ${SOLANA_USDC_MINT:-}
       SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
       SOLANA_DRIP_COOLDOWN_MS: ${SOLANA_DRIP_COOLDOWN_MS:-86400000}
       # The native-SOL route (POST /api/solana/request) and its
       # SOLANA_SOL_AMOUNT config are retired entirely (issue #945, §4.6) —
       # only the USDC-only drip runs on this box.
-      #
-      # ── Mina — public devnet, USDC only ────────────────────────────────
-      # MINA_FAUCET_KEY / MINA_DRIP_AMOUNT are deliberately NOT set — the
-      # native-MINA route (POST /api/mina/request) is retired (§4.6); this
-      # faucet has no native-MINA leg at all, so the treasury key that would
-      # fund it is not part of this box's secret set.
-      # PUBLIC Mina devnet, matching this block's heading and the faucet code's
-      # own default (packages/faucet/src/mina-usdc.mjs). NOT the self-hosted
-      # `https://mina.${DOMAIN}/graphql` that infra/linode-node/docker-compose.node.yml
-      # still carries: that lightnet host was DELETED 2026-07-19 with the rest of
-      # the self-hosted chain boxes (infra/devnet-manage.sh's header; issue #819),
-      # so the name now resolves to registrar parking and fails TLS — a box
-      # shipped with it would have its Mina USDC leg dead on arrival.
-      MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
-      # USDC transfer-drip (o1js proving) — set by the human on this box after
-      # generating a FRESH treasury key (§4.4; never copied from box 1).
-      # Unset → POST /api/mina/usdc-request 503s.
-      MINA_USDC_TREASURY_KEY: ${MINA_USDC_TREASURY_KEY:-}
-      MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}
-      MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
-      MINA_TX_FEE: ${MINA_TX_FEE:-0.2}
       # ── Base Sepolia — PUBLIC Base testnet (chainId 84532) ─────────────
       # Mints the ungated mock USDC (mint() needs no faucet USDC balance); the
       # faucet key only needs Base Sepolia ETH for gas. Unset key → route 503s.
@@ -67,11 +52,23 @@ services:
       # on any chain, ever, from this box.
       BASE_SEPOLIA_ETH_AMOUNT: '0'
     volumes:
-      # Fresh treasury keypair, generated ON THIS BOX (§4.4) — never copied
-      # from box 1's /root/keys/solana-usdc-treasury.json. A missing file
-      # disables only the Solana leg (createSolanaFaucet returns null); it
-      # does not fail the container.
-      - /root/keys/solana-usdc-treasury.json:/keys/usdc-authority.json:ro
+      # Fresh treasury keypair, generated ON THIS BOX (§4.4) by
+      # ./generate-solana-treasury.sh — never copied from another box. It is
+      # this box's mint AUTHORITY as well as its fee payer.
+      #
+      # Long syntax with create_host_path: false on purpose. Docker's default
+      # is to CREATE a missing bind source as an empty DIRECTORY, and that is
+      # exactly what happened here: the path below sat as a 0-byte directory
+      # for weeks, `createSolanaFaucet` saw no keypair file, and the leg
+      # quietly served 503s while every container reported healthy. Failing
+      # `up` outright is the honest behaviour — a box with no treasury cannot
+      # do this job, and should say so at the moment it is started.
+      - type: bind
+        source: /root/keys/solana-usdc-treasury.json
+        target: /keys/usdc-authority.json
+        read_only: true
+        bind:
+          create_host_path: false
     restart: unless-stopped
     healthcheck:
       test:

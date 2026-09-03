@@ -22,9 +22,9 @@
 # file, so that was undetected until #465.
 #
 # One static binary, one config file, no JavaScript runtime anywhere in the
-# final image -- contrast the TypeScript connector's root ./Dockerfile, whose
-# Node >= 22.12 pin exists solely for Mina/o1js's ESM packaging (a dependency
-# ADR 0002 drops entirely from this rewrite).
+# final image -- contrast the TypeScript connector's root ./Dockerfile, which
+# pinned Node >= 22.12 solely for Mina/o1js's ESM packaging (a dependency
+# ADR 0002 dropped from this rewrite and ADR 0065 removed from the repository).
 #
 # Build (single platform, from the repository root so the build context
 # includes crates/ and packages/solana-program/):
@@ -139,6 +139,15 @@ RUN apk add --no-cache ca-certificates && \
     mkdir -p /app/state && chown connector:connector /app/state
 
 COPY --from=builder /workspace/target/release/connector /usr/local/bin/connector
+# `stub-app` is the connector package's second [[bin]], so `-p connector`
+# above already built it -- this copies it rather than compiling anything new.
+# It is the payment-oblivious app behind a route in `local/`'s topologies: a
+# connector needs *something* to terminate to, and shipping the trivial one in
+# the same image is what keeps those topologies from needing an app repo. It
+# holds no secret, performs no cryptography and answers `POST /` (see its
+# module header), so nothing about it is reachable unless an operator points a
+# route at it deliberately.
+COPY --from=builder /workspace/target/release/stub-app /usr/local/bin/stub-app
 
 USER connector
 ENTRYPOINT ["/usr/local/bin/connector"]

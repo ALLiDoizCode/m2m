@@ -16,16 +16,16 @@ README.md`'s own steps), referenced from a committed config **by file path only*
 the path is committed, the file behind it never is (`.gitignore`'s key block; see §3 to check a
 new path is covered).
 
-| Key class                     | Role                                                                                                                                          | On-box path (typical)                                                                                                   | Referenced from                                                                                                                 |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Signer key                    | This node's ILP identity — signs `GET /ilp/identity`, opens every NIP-59 gift wrap this node terminates (ADR 0012). Holds no funds.           | `signer-rust.key` (repo-relative on the box), mounted to `/app/data/signer.key`                                         | `[signer] key_file`                                                                                                             |
-| Settlement key (EVM)          | Signs on-chain balance-proof redemptions / deposits on Base Sepolia. Holds real (devnet) USDC.                                                | `settlement-rust.key`, mounted to `/app/data/settlement.key`                                                            | `[settlement.evm.key] key_file` (or legacy flat `[settlement.key]`)                                                             |
-| Settlement key (Solana)       | Same role as above, on the deployed `payment-channel` program. 32-byte ed25519 seed, 64 hex chars.                                            | `settlement-solana-rust.key`, mounted to `/app/data/settlement-solana.key`                                              | `[settlement.solana.key] key_file`                                                                                              |
-| Gas-station Solana key        | Store box's kind:5096 fee-payer identity. 128-char hex (raw ed25519 keypair bytes).                                                           | `infra/linode-store/gas-station-solana.key` on the store box, plus `GAS_STATION_SOLANA_SECRET_KEY` in that box's `.env` | Box-local tooling, not `connector-rust.toml`                                                                                    |
-| Peering shared secret         | Bilateral BTP peering credential (issue #750). Both sides need the same bytes.                                                                | `<peer-name>.secret` (e.g. `store-peer.secret`), mounted per the `[[peers]]` entry                                      | `[[peers]] credential = { secret_file = "..." }`                                                                                |
-| Operator write key            | RFC 9421 ed25519 keypair authorizing operator writes (`POST /packets`).                                                                       | `operator.pem` (private half stays with the operator, never on the box)                                                 | Public half only: `operator.write_keys` (hex, in the committed config)                                                          |
-| Operator bearer token         | Read-surface auth (peers, routes, channels, claims, `GET /metrics`, ...).                                                                     | Not a file — a random hex string pasted into the config                                                                 | `operator.bearer_token` (in the committed config, not a key file — rotate by editing the config value, same as any other field) |
-| Solana program deploy keypair | Fixes a program's on-chain address across redeploys (`solana program deploy --program-id <keypair>`). Not a signing identity used at runtime. | `crates/<settlement-crate>/deploy/*-keypair.json` (never committed — see `.gitignore` and issue #922)                   | `solana program deploy` invocations only, not loaded by the running connector                                                   |
+| Key class                     | Role                                                                                                                                          | On-box path (typical)                                                                                                                   | Referenced from                                                                                                                                                          |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Signer key                    | This node's ILP identity — signs `GET /ilp/identity`, opens every NIP-59 gift wrap this node terminates (ADR 0012). Holds no funds.           | `signer-rust.key` (repo-relative on the box), mounted to `/app/data/signer.key`                                                         | `[signer] key_file`                                                                                                                                                      |
+| Settlement key (EVM)          | Signs on-chain balance-proof redemptions / deposits on Base Sepolia. Holds real (devnet) USDC.                                                | `settlement-rust.key`, mounted to `/app/data/settlement.key`                                                                            | `[settlement.evm.key] key_file` (or legacy flat `[settlement.key]`)                                                                                                      |
+| Settlement key (Solana)       | Same role as above, on the deployed `payment-channel` program. 32-byte ed25519 seed, 64 hex chars.                                            | `settlement-solana-rust.key`, mounted to `/app/data/settlement-solana.key`                                                              | `[settlement.solana.key] key_file`                                                                                                                                       |
+| Gas-station Solana key        | Store box's kind:5096 fee-payer identity. 128-char hex (raw ed25519 keypair bytes).                                                           | `infra/linode-store/gas-station-solana.key` on the store box, plus `GAS_STATION_SOLANA_SECRET_KEY` in that box's `.env`                 | Box-local tooling, not `connector-rust.toml`                                                                                                                             |
+| Peering shared secret         | Bilateral BTP peering credential (issue #750). Both sides need the same bytes.                                                                | `<peer-name>.secret` (e.g. `store-peer.secret`), mounted per the `[[peers]]` entry                                                      | `[[peers]] credential = { secret_file = "..." }`                                                                                                                         |
+| Operator write key            | RFC 9421 ed25519 keypair authorizing operator writes (`POST /packets`).                                                                       | `operator.pem` (private half stays with the operator, never on the box); public halves listed in `operator-write-keys.allow` on the box | Public halves only: `operator.write_keys_file` (one 64-hex key per line, `#` comments; issue #1003)                                                                      |
+| Operator bearer token         | Read-surface auth (peers, routes, channels, claims, `GET /metrics`, ...).                                                                     | `operator-bearer-token.secret`, mounted to `/app/data/operator-bearer-token`                                                            | `operator.bearer_token_file` (issue #1003 — a path, like every other credential here; the literal `operator.bearer_token` is still accepted but must never be committed) |
+| Solana program deploy keypair | Fixes a program's on-chain address across redeploys (`solana program deploy --program-id <keypair>`). Not a signing identity used at runtime. | `crates/<settlement-crate>/deploy/*-keypair.json` (never committed — see `.gitignore` and issue #922)                                   | `solana program deploy` invocations only, not loaded by the running connector                                                                                            |
 
 Config that references a key **by path** is safe to keep public; the file at that path never is.
 If a value is ever hand-pasted into a config as a literal instead of a `key_file`/`secret_file`
@@ -35,9 +35,9 @@ pointer, that is itself the finding — stop and treat the config as compromised
 
 ## 2. Rotating a key
 
-The shape is the same for every file-backed key class above (signer, settlement EVM/Solana,
-gas-station, peering secret): generate fresh material, put it on the box, restart the service
-that reads it, confirm the old value is dead.
+The shape is the same for every key class above — since issue #1003 that is all of them, the
+operator bearer token and write-key allowlist included: generate fresh material, put it on the
+box, restart the service that reads it, confirm the old value is dead.
 
 1. **Generate the replacement**, following the same recipe the key was originally created with —
    `deploy/connector-rust/README.md` §1 for the signer key (`openssl rand -hex 32`), the same
@@ -45,21 +45,24 @@ that reads it, confirm the old value is dead.
    a settlement account you want a fresh address for (a new EVM/Solana keypair, not just new bytes
    at the same address — rotating the key at the _same_ address does not stop a party who already
    has the old key from continuing to sign for it before the sweep in step 3 completes).
-2. **Put it on the box.** Prefer `.github/workflows/fleet-ops.yml`'s `config-apply` when the
-   change is to a config file field (e.g. `operator.bearer_token`, `operator.write_keys`); for a
-   bind-mounted key _file_ (signer/settlement/peering — never committed, so `config-apply` does
-   not touch it), copy it directly onto the box (`scp`, matching the pattern in
+2. **Put it on the box.** A key _file_ (signer/settlement/peering, and since issue #1003 the
+   operator bearer token and write-key allowlist too) is never committed, so no workflow here has
+   ever written one: copy it directly onto the box (`scp`, matching the pattern in
    `docs/operators/devnet-ssh-hardening.md` §2) at the exact path the config's `key_file`/
-   `secret_file` already names. Set `chmod 600` and `chown 10001:10001` (the container's uid,
+   `secret_file` already names. A change to a config file _field_ goes through whichever repo
+   deploys that box — for relay and store, their own `deploy/` bundles, since
+   [ADR 0068](../adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
+   retired this repo's `fleet-ops config-apply`. Set `chmod 600` and `chown 10001:10001` (the container's uid,
    `deploy/connector-rust/README.md` §1) — a key unreadable by that uid fails the service at
    startup, loudly, not silently.
 3. **Sweep funded material before rotating a settlement/gas-station key**, not after: send the
    balance to the new address first, so there is no window where the old address is both known-bad
    and still holding value. `connector#659`'s gas-station rotation is the precedent — balance swept
    to a freshly generated address, then the key file replaced.
-4. **Restart the service that reads it.** `fleet-ops.yml`'s `restart` operation
-   (`docker compose restart <service>`) for anything the running connector reads (signer,
-   settlement, peering); the box's own gas-station tooling for that key, since it is not read by
+4. **Restart the service that reads it.** `docker compose restart <service>` on the box for
+   anything the running connector reads (signer, settlement, peering) — `fleet-ops.yml`'s
+   `restart` operation does this for the faucet box only, the one box this repo still deploys
+   (ADR 0068); the box's own gas-station tooling for that key, since it is not read by
    `connector-rust.toml` at all.
 5. **Verify** per §4 below before considering the rotation complete.
 6. **Confirm the peer side too**, for a peering secret — both ends hold the same bytes, so a
@@ -113,10 +116,10 @@ For material with an on-chain address (settlement, gas-station), also confirm on
 change on the box proves the box moved on, not that the old key is now safe to leave in whatever
 git history or logs it may already be in.
 
-`fleet-ops.yml`'s `config-read` redacts secret-shaped config _values_ but only ever reads the
-committed config file itself — it cannot see a bind-mounted key file's bytes (they aren't in the
-config), so it is not a substitute for the digest comparison above; use it only to confirm the
-`key_file`/`secret_file` _path_ on the box still matches what's committed.
+Reading the box's config back (by hand over ssh — `fleet-ops.yml`'s `config-read` was retired with
+its relay/store legs, ADR 0068) confirms the `key_file`/`secret_file` _path_ and nothing more: a
+bind-mounted key file's bytes are not in the config, so this is never a substitute for the digest
+comparison above.
 
 ---
 

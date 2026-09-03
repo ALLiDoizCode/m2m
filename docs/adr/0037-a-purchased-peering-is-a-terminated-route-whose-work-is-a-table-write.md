@@ -1,6 +1,14 @@
 # A purchased peering is a terminated route whose work is a table write
 
+**Status:** Retired by [0043](0043-purchasable-peering-is-removed.md). **The mechanism is gone from `crates/`** — no `[peer_sale]` section, no `deliver_peer_sale`, no peer-sale route kind; `[peer_sale]` survives only as a config key parsed to be rejected by name. Kept for **why a purchase was shaped this way**, which is what stops it being rebuilt.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
+> **The feature this record decides is removed by
+> [ADR 0043](0043-purchasable-peering-is-removed.md).** A peering cannot be bought at all: there is
+> no `[peer_sale]`, no priced write, no `deliver_peer_sale`, and no approval queue either. Read this
+> record for why a purchase was shaped the way it was, not for anything the connector does.
+> ADR 0006's "the connector does not decide who its peers are" now holds without exception.
 
 Issue #885 (toon-meta#310, child C2 of #867 "sell peering") prices issue #884's runtime
 peer/route mutation and advertises it in kind:10032. This ADR states the shape the purchase

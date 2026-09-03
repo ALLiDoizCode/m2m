@@ -1,0 +1,236 @@
+# Fleet pin drift — do the three node repos still agree on one connector build?
+#
+# ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
+# ADR 0068 moved the connector pin out of this repository: `toon-protocol/relay`,
+# `toon-protocol/store` and `toon-protocol/gas-station` each name the connector
+# image they run, in one place in their own `deploy/` bundle, guarded there.
+# That decision is right — this repo no longer has a legitimate write path onto
+# those boxes, and the retired promotion workflow was reporting successful
+# config-applies against a path nothing read.
+#
+# But retiring the promotion removed two things, and only one of them was meant.
+# The WRITE PATH went deliberately. The SIGNAL went with it: promotion used to
+# boot one candidate image against the fleet's committed configs, which is the
+# only moment anything ever asked whether the fleet agreed with itself. Since
+# then three repos choose a connector build independently and nothing notices
+# when they diverge — until a box misbehaves in a way that takes a human an
+# afternoon to trace back to "these two are not on the same binary".
+#
+# This buys that signal back without buying back the write path. It is strictly
+# READ-ONLY and holds no credential: all four repos are public, so the three
+# pins are read over plain HTTPS, and GHCR is asked with an anonymous pull
+# token. It writes to no box, dispatches no workflow, and moves no tag.
+#
+# ── WHAT IT ASSERTS ─────────────────────────────────────────────────────────
+#   1. Each pin is findable. A pin that cannot be parsed means the file moved
+#      or the key was renamed — the bundle changed shape and this check went
+#      blind, which must be loud rather than green.
+#   2. All three name the SAME build. A claim accepted by one box against a
+#      channel another box's binary resolves differently is the shape of an
+#      afternoon lost.
+#   3. Each pin is IMMUTABLE — `rust-sha-<sha>`, never `rust-release`,
+#      `rust-main` or `latest`. ADR 0068 requires the pin be a reviewed commit;
+#      a moving tag makes it a race instead. `:rust-release` specifically is
+#      frozen at `rust-sha-8708caf`, which predates connector#1230 and cannot
+#      pay for a peering it establishes — see ADR 0068's own note on the tag.
+#   4. Each pin is PULLABLE from GHCR. A pin to a tag that does not exist is a
+#      box that cannot come back from a restart, and nothing else would say so
+#      until it tried.
+#
+# ── WHAT IT ONLY WARNS ABOUT ────────────────────────────────────────────────
+# How far behind `main` the fleet is. A pin legitimately lags — that is what
+# pinning IS — so being behind is reported, never failed. The distinction the
+# summary draws is the one that matters when deciding whether to bump: commits
+# that touch `crates/*/src` change the shipped binary, and commits that touch
+# only tests, docs or fixtures do not. "Eleven commits behind, none of them
+# shipped code" is a fleet that is current in substance.
+#
+# ── WHAT REACHES A HUMAN ────────────────────────────────────────────────────
+# Same instrument as `fleet-health.yml`, and for the same reason — detection
+# nobody sees is worth nothing: a single rolling GitHub issue labelled
+# `needs:human` + `bug`, updated while the drift persists and closed by the
+# first green run. Daily, because a pin only moves when somebody merges a
+# deploy PR; this is not a race to beat anything, it bounds how long a split
+# fleet goes unnoticed.
+name: Fleet pin drift
+
+on:
+  schedule:
+    # Daily, off the hour. Pins change on merge, not on a timer.
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  # Never two at once — the second would race the first's open/close of the
+  # rolling alert issue.
+  group: fleet-pin-drift
+  cancel-in-progress: false
+
+jobs:
+  pins-agree:
+    name: The three node repos name one connector build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read each node repo's pin, and hold them to each other
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_TITLE: '[fleet-pins] the node repos disagree on the connector build'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # The pin of record in each repo, named here exactly as that repo's
+          # own guard test names it. If one of these paths 404s, the bundle
+          # moved and this check has to fail rather than quietly compare two.
+          fetch() {
+            curl -fsSL --retry 3 --retry-delay 2 \
+              "https://raw.githubusercontent.com/toon-protocol/$1/main/$2"
+          }
+
+          # relay bakes the connector into its own image; the ARG default is
+          # the pin (deploy/bundle.test.ts asserts it is the only place).
+          PIN_RELAY=$(fetch relay deploy/Dockerfile \
+            | sed -n 's/^ARG CONNECTOR_TAG=\([A-Za-z0-9._-]*\).*/\1/p' | head -1)
+          # store and gas mount their config and pin the published image.
+          PIN_STORE=$(fetch store deploy/docker-compose.yml \
+            | sed -n 's|^[[:space:]]*image:[[:space:]]*ghcr\.io/toon-protocol/connector:\([A-Za-z0-9._-]*\).*|\1|p' | head -1)
+          PIN_GAS=$(fetch gas-station deploy/docker-compose.yml \
+            | sed -n 's|^[[:space:]]*image:[[:space:]]*ghcr\.io/toon-protocol/connector:\([A-Za-z0-9._-]*\).*|\1|p' | head -1)
+
+          echo "relay=${PIN_RELAY:-<unparsed>} store=${PIN_STORE:-<unparsed>} gas=${PIN_GAS:-<unparsed>}"
+
+          FAILURES=""
+          note() { FAILURES="${FAILURES}- $1"$'\n'; }
+
+          for pair in "relay:$PIN_RELAY" "store:$PIN_STORE" "gas-station:$PIN_GAS"; do
+            repo=${pair%%:*}; pin=${pair#*:}
+            if [ -z "$pin" ]; then
+              note "**$repo**: no connector pin could be parsed — the file moved, or the key was renamed. This check is blind until that is fixed."
+              continue
+            fi
+            case "$pin" in
+              rust-release|rust-main|latest)
+                note "**$repo** pins the moving tag \`$pin\`. ADR 0068 requires an immutable \`rust-sha-\` pin bumped by a reviewed commit. \`:rust-release\` in particular is frozen at \`rust-sha-8708caf\`, which predates connector#1230 and cannot pay for a peering it establishes." ;;
+              rust-sha-*) ;;
+              *)
+                note "**$repo** pins \`$pin\`, which is not an immutable \`rust-sha-\` build tag." ;;
+            esac
+          done
+
+          if [ -n "$PIN_RELAY" ] && [ -n "$PIN_STORE" ] && [ -n "$PIN_GAS" ] \
+             && { [ "$PIN_RELAY" != "$PIN_STORE" ] || [ "$PIN_STORE" != "$PIN_GAS" ]; }; then
+            note "The three repos name **different** builds — relay \`$PIN_RELAY\`, store \`$PIN_STORE\`, gas-station \`$PIN_GAS\`. If a staged rollout is in progress this is expected and clears when the last repo lands."
+          fi
+
+          # A pin nobody can pull is a box that cannot come back from a
+          # restart. Anonymous pull token — the package is public.
+          for pair in "relay:$PIN_RELAY" "store:$PIN_STORE" "gas-station:$PIN_GAS"; do
+            repo=${pair%%:*}; pin=${pair#*:}
+            [ -z "$pin" ] && continue
+            TOKEN=$(curl -fsSL "https://ghcr.io/token?scope=repository%3Atoon-protocol%2Fconnector%3Apull" | jq -r .token)
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X GET \
+              -H "Authorization: Bearer $TOKEN" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/toon-protocol/connector/manifests/$pin" || echo 000)
+            [ "$CODE" = "200" ] || note "**$repo**'s pin \`$pin\` is not pullable from GHCR (HTTP \`$CODE\`). A box on this pin cannot be recreated."
+          done
+
+          # ── Informational: how far behind main, and does it matter ────────
+          BEHIND_NOTE=""
+          if [ -n "$PIN_RELAY" ] && [ "$PIN_RELAY" = "$PIN_STORE" ] && [ "$PIN_STORE" = "$PIN_GAS" ]; then
+            SHA=${PIN_RELAY#rust-sha-}
+            if CMP=$(gh api "repos/${{ github.repository }}/compare/$SHA...main" 2>/dev/null); then
+              BEHIND=$(echo "$CMP" | jq -r '.ahead_by')
+              SRC=$(echo "$CMP" | jq -r '[.files[]?.filename | select(test("^crates/[^/]+/src/"))] | length')
+              if [ "$BEHIND" = "0" ]; then
+                BEHIND_NOTE="The fleet is on \`main\`'s latest build."
+              elif [ "$SRC" = "0" ]; then
+                BEHIND_NOTE="The fleet is **$BEHIND commit(s) behind** \`main\`, none of which touch \`crates/*/src\` — the shipped binary is unchanged, so there is nothing to gain from a bump."
+              else
+                BEHIND_NOTE="The fleet is **$BEHIND commit(s) behind** \`main\`, and **$SRC of those files are under \`crates/*/src\`** — shipped code the fleet is not running. Worth a deliberate bump."
+                echo "::warning::fleet pin is $BEHIND commit(s) behind main, including shipped-code changes"
+              fi
+            else
+              BEHIND_NOTE="Could not compare \`$SHA\` against \`main\` (not an ancestor?)."
+            fi
+          fi
+
+          {
+            echo "### Fleet connector pins"
+            echo ""
+            echo "| repo | pin | source of record |"
+            echo "| --- | --- | --- |"
+            echo "| relay | \`${PIN_RELAY:-—}\` | \`deploy/Dockerfile\` → \`ARG CONNECTOR_TAG\` |"
+            echo "| store | \`${PIN_STORE:-—}\` | \`deploy/docker-compose.yml\` |"
+            echo "| gas-station | \`${PIN_GAS:-—}\` | \`deploy/docker-compose.yml\` |"
+            echo ""
+            [ -n "$BEHIND_NOTE" ] && { echo "$BEHIND_NOTE"; echo ""; }
+          } > /tmp/summary.md
+          cat /tmp/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+          # Deliberately NOT `--search "... in:title"`: the title contains `[`
+          # and `]`, which GitHub's search syntax does not treat as literals,
+          # and a search that silently matched nothing would open a fresh alert
+          # every run instead of updating one.
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open \
+                       --label "needs:human" --limit 100 \
+                       --json number,title \
+                       --jq ".[] | select(.title == \"$ALERT_TITLE\") | .number" | head -1)
+
+          if [ -z "$FAILURES" ]; then
+            if [ -n "$EXISTING" ]; then
+              gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body \
+                "✅ Recovered — the three repos agree again, on \`$PIN_RELAY\`, in [this run]($RUN_URL). Closing; a later divergence opens a fresh alert."
+              gh issue close "$EXISTING" --repo "${{ github.repository }}" --reason completed
+              echo "Closed alert #$EXISTING."
+            fi
+            echo "Pins agree: ${PIN_RELAY}."
+            exit 0
+          fi
+
+          BODY=/tmp/alert-body.md
+          {
+            echo "The three node repositories that deploy this connector do not agree on one build."
+            echo ""
+            echo "**Run:** $RUN_URL"
+            echo ""
+            cat /tmp/summary.md
+            echo "### What is wrong"
+            echo ""
+            printf '%s' "$FAILURES"
+            echo ""
+            echo "### Fixing it"
+            echo ""
+            echo "Each repo owns its own pin (ADR 0068 — nothing in this repository moves a tag onto a box)."
+            echo "Bump each one by a reviewed commit that changes the pin **and** the literal in that repo's"
+            echo "own guard test, then apply on the box:"
+            echo ""
+            echo '```sh'
+            echo '# relay — deploy/Dockerfile ARG CONNECTOR_TAG, then its publish workflow rebuilds'
+            echo '#          relay-connector:release and Watchtower recreates within ~60s.'
+            echo '# store / gas-station — deploy/docker-compose.yml, then on the box:'
+            echo 'cd /root/<store|gas-station> && git pull && cd deploy && ./render.sh && docker compose up -d'
+            echo '```'
+            echo ""
+            echo "Full runbook: \`docs/operators/fleet-release-and-health.md\` § \"Keeping the three pins together\"."
+            echo ""
+            echo "<sub>Opened automatically by \`.github/workflows/fleet-pin-drift.yml\`. It closes itself when a later run is green.</sub>"
+          } > "$BODY"
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body-file "$BODY"
+            echo "Updated alert #$EXISTING."
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$ALERT_TITLE" \
+              --label "needs:human" --label "bug" \
+              --body-file "$BODY"
+            echo "Opened a new alert."
+          fi
+
+          echo "::error::the node repos disagree on the connector build — see the alert issue"
+          exit 1

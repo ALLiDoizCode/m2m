@@ -15,9 +15,17 @@ on:
     paths:
       - 'packages/contracts/**'
       - '.github/workflows/contracts.yml'
+  # Every base branch, not just `main` — the same defect ci.yml carried and
+  # the same fix (issue #1152). A `pull_request` trigger filters on the PR's
+  # BASE, so `branches: [main]` silently skipped `forge test` on any stacked
+  # PR that touched the contracts. The `paths` filter below is the deliberate
+  # narrowing here and is untouched; the base filter never was one, it was an
+  # accident of where this workflow was split out of ci.yml. Widening costs
+  # almost nothing extra, because `paths` still keeps this job off every PR
+  # that does not touch `packages/contracts/`.
   pull_request:
     branches:
-      - main
+      - '**'
     paths:
       - 'packages/contracts/**'
       - '.github/workflows/contracts.yml'
@@ -36,7 +44,16 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          # Pinned, not `nightly`, matching ci.yml's own pin and closing the
+          # exposure its comment flagged ("contracts.yml still uses `nightly`
+          # -- same exposure, separate change"). Proven necessary 2026-08-14:
+          # forge 1.8.0-nightly (7242662) fails
+          # testFork_Cutover_GaslessChannelLifecycleOnRealForkedUsdc with a
+          # bare `EvmError: Revert` (same gas, 3/3 CI runs + docker repro)
+          # while v1.7.1 passes the identical branch against the identical
+          # RPC. A gate that proves deploy scripts work must not break from
+          # an upstream build we never ran against.
+          version: v1.7.1
         env:
           # foundryup curls api.github.com unauthenticated and gets 403 when the
           # runner IP is rate-limited. Exporting the workflow's auto-provisioned
@@ -77,7 +94,16 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          # Pinned, not `nightly`, matching ci.yml's own pin and closing the
+          # exposure its comment flagged ("contracts.yml still uses `nightly`
+          # -- same exposure, separate change"). Proven necessary 2026-08-14:
+          # forge 1.8.0-nightly (7242662) fails
+          # testFork_Cutover_GaslessChannelLifecycleOnRealForkedUsdc with a
+          # bare `EvmError: Revert` (same gas, 3/3 CI runs + docker repro)
+          # while v1.7.1 passes the identical branch against the identical
+          # RPC. A gate that proves deploy scripts work must not break from
+          # an upstream build we never ran against.
+          version: v1.7.1
         env:
           # foundryup curls api.github.com unauthenticated and gets 403 when the
           # runner IP is rate-limited. Exporting the workflow's auto-provisioned
@@ -109,7 +135,16 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          # Pinned, not `nightly`, matching ci.yml's own pin and closing the
+          # exposure its comment flagged ("contracts.yml still uses `nightly`
+          # -- same exposure, separate change"). Proven necessary 2026-08-14:
+          # forge 1.8.0-nightly (7242662) fails
+          # testFork_Cutover_GaslessChannelLifecycleOnRealForkedUsdc with a
+          # bare `EvmError: Revert` (same gas, 3/3 CI runs + docker repro)
+          # while v1.7.1 passes the identical branch against the identical
+          # RPC. A gate that proves deploy scripts work must not break from
+          # an upstream build we never ran against.
+          version: v1.7.1
         env:
           # foundryup curls api.github.com unauthenticated and gets 403 when the
           # runner IP is rate-limited. Exporting the workflow's auto-provisioned

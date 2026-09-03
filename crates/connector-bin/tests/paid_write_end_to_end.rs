@@ -6,7 +6,7 @@
 //! exercised with fakes (`connector-client-edge`'s `price_charging_real_chain.rs`
 //! uses an in-process `tower::Service` and a `FakeAppClient`); the one test
 //! that drove the real binary (`two_connectors_and_a_stub_app.rs`, since
-//! deleted with the raw-TCP peer wire it proved -- ADR 0027, issue #679)
+//! deleted with the raw-TCP transport it proved -- ADR 0027, issue #679)
 //! used a zero-priced route and asserted delivery, never a claim.
 //!
 //! This test spawns a real `anvil` chain, deploys a real `TokenNetworkRegistry`/
@@ -163,8 +163,17 @@ fn evm_claim_json(
 /// `signer_public_key_base58` are supplied rather than derived here, since
 /// a genuine claim and a forged one differ only in which key signs, not in
 /// how the JSON is shaped.
+///
+/// `program_id_base58` is the settlement program the channel lives under
+/// (`client-edge-spec.md` §1.3), which is the same program id the balance
+/// proof the caller signed binds at offset 16 (ADR 0053). It is a parameter
+/// rather than a literal because this fixture used to write the payer's own
+/// public key there -- a value no channel could ever live under -- and a
+/// conforming payer is what these tests are supposed to be modelling
+/// (issue #1127).
 fn solana_claim_json(
     channel_account_base58: &str,
+    program_id_base58: &str,
     nonce: u64,
     transferred_amount: u64,
     signature_base64: &str,
@@ -177,7 +186,7 @@ fn solana_claim_json(
             "messageId": "msg-{nonce}",
             "timestamp": "2026-02-02T12:00:00.000Z",
             "senderId": "buyer",
-            "programId": "{signer_public_key_base58}",
+            "programId": "{program_id_base58}",
             "channelAccount": "{channel_account_base58}",
             "nonce": {nonce},
             "transferredAmount": "{transferred_amount}",
@@ -187,23 +196,48 @@ fn solana_claim_json(
     )
 }
 
+/// One request the recording app below actually received, over its own
+/// socket: the body it was sent, and the headers that came with it. The
+/// headers are part of the record because ADR 0040's attribution
+/// (`X-TOON-Payer`/`-Amount`/`-Chain`) is only real if it survives the whole
+/// path -- a real connector binary, a real HTTP hop -- and a test reading
+/// them off an in-process fake would not prove that.
+#[derive(Clone)]
+struct RecordedWrite {
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+}
+
+/// What `header` this write carried, as a string, or `None` if it carried
+/// none -- the two outcomes ADR 0040 distinguishes.
+fn recorded_header<'a>(write: &'a RecordedWrite, header: &str) -> Option<&'a str> {
+    write
+        .headers
+        .get(header)
+        .map(|value| value.to_str().expect("header is valid ASCII"))
+}
+
 /// A real, independently queryable app: a genuine `axum` HTTP server bound
 /// to its own OS-assigned socket, reachable only over that socket (never
 /// invoked in-process) -- so "the app recorded the write" and "the app
 /// recorded nothing" are facts about a second real process boundary, not
 /// trust in the packet's own echoed response.
-async fn spawn_recording_app() -> (String, Arc<Mutex<Vec<Bytes>>>) {
+async fn spawn_recording_app() -> (String, Arc<Mutex<Vec<RecordedWrite>>>) {
     #[derive(Clone)]
     struct RecordingState {
-        recorded: Arc<Mutex<Vec<Bytes>>>,
+        recorded: Arc<Mutex<Vec<RecordedWrite>>>,
     }
 
-    async fn record(State(state): State<RecordingState>, body: Bytes) -> StatusCode {
+    async fn record(
+        State(state): State<RecordingState>,
+        headers: axum::http::HeaderMap,
+        body: Bytes,
+    ) -> StatusCode {
         state
             .recorded
             .lock()
             .expect("recorded-writes lock poisoned")
-            .push(body);
+            .push(RecordedWrite { headers, body });
         StatusCode::OK
     }
 
@@ -277,17 +311,21 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
     let buyer_address = derive_evm_address(&buyer_public.serialize());
 
     // A funded channel with real, on-chain-deposited value -- read back from
-    // the chain's own receipt, never invented by this test.
+    // the chain's own receipt, never invented by this test. The value goes
+    // on the *buyer's* side, because the buyer is who signs the claims this
+    // node redeems; on a real deployment the buyer deposits it from their
+    // own wallet (as the Solana half of this file has them do below), and
+    // here the fixture-only delegate deposit stands in (issue #1118).
     let paid_channel = backend
         .open(buyer_address.to_vec(), ChronoDuration::hours(1))
         .await
         .expect("open a real channel");
     let paid_state = backend
-        .fund(&paid_channel, 10 * ROUTE_PRICE)
+        .fund_counterparty(&paid_channel, 10 * ROUTE_PRICE)
         .await
         .expect("fund the channel with real ERC-20 value");
     assert_eq!(
-        paid_state.deposited,
+        paid_state.counterparty_deposited,
         10 * ROUTE_PRICE,
         "a real transaction genuinely moved this value on chain"
     );
@@ -295,15 +333,25 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
     // A second, separately funded channel that received real value below
     // the route's price -- proving the underpayment case is refused against
     // genuine on-chain funding too, not a synthetic shortfall.
+    //
+    // A SECOND BUYER IDENTITY, not the one above (ADR 0059, issue #1158): a
+    // channel id is now derived from its participant pair, so this node and
+    // one buyer have exactly one live channel between them and a second
+    // `openChannel` for the same pair reverts `ChannelAlreadyExists`. Two
+    // concurrently live channels means two payers, which is what a real
+    // deployment looks like anyway.
+    let underpaid_buyer_secret = SecretKey::parse(&[22u8; 32]).expect("valid secret key");
+    let underpaid_buyer_address =
+        derive_evm_address(&PublicKey::from_secret_key(&underpaid_buyer_secret).serialize());
     let underpaid_channel = backend
-        .open(buyer_address.to_vec(), ChronoDuration::hours(1))
+        .open(underpaid_buyer_address.to_vec(), ChronoDuration::hours(1))
         .await
-        .expect("open a second real channel");
+        .expect("open a second real channel, with a second buyer");
     let underpaid_state = backend
-        .fund(&underpaid_channel, ROUTE_PRICE / 2)
+        .fund_counterparty(&underpaid_channel, ROUTE_PRICE / 2)
         .await
         .expect("fund the second channel with real ERC-20 value, less than the route's price");
-    assert_eq!(underpaid_state.deposited, ROUTE_PRICE / 2);
+    assert_eq!(underpaid_state.counterparty_deposited, ROUTE_PRICE / 2);
 
     // A real app: its own socket, its own process-independent record of
     // what it received.
@@ -330,7 +378,8 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
     // `state_dir` -- config load refuses one that does not, because its
     // claim watermarks would live only in memory and every spent claim
     // would be replayable after a restart.
-    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let state_dir_handle = tempfile::tempdir().expect("temp state dir");
+    let state_dir = state_dir_handle.path().display();
     let config = write_config(&format!(
         r#"
 client_edge_addr = "127.0.0.1:0"
@@ -359,10 +408,11 @@ handler_url = "http://{app_addr}"
 price = {ROUTE_PRICE}
 
 # Issue #558: whose signature this node accepts on each of the two channels
-# opened above -- the buyer's address, the one the chain itself holds as
-# their counterparty. Without this the connector has a record of no channel
-# and refuses every claim, rather than believing what a claim says about its
-# own signer.
+# opened above -- each channel's own buyer address, the one the chain itself
+# holds as this node's counterparty there. Without this the connector has a
+# record of no channel and refuses every claim, rather than believing what a
+# claim says about its own signer. Two channels, two buyers: one live channel
+# per pair (ADR 0059).
 [[client_channels]]
 channel_id = "{paid_channel_id}"
 counterparty = "{buyer}"
@@ -371,17 +421,18 @@ token_network_address = "{token_network}"
 
 [[client_channels]]
 channel_id = "{underpaid_channel_id}"
-counterparty = "{buyer}"
+counterparty = "{underpaid_buyer}"
 chain_id = {ANVIL_CHAIN_ID}
 token_network_address = "{token_network}"
 "#,
         key_file = key_file.path().display(),
-        state_dir = state_dir.path().display(),
+        state_dir = state_dir,
         settlement_key_file = settlement_key_file.path().display(),
         rpc_url = anvil.rpc_url,
         paid_channel_id = paid_channel.0,
         underpaid_channel_id = underpaid_channel.0,
         buyer = to_hex(&buyer_address),
+        underpaid_buyer = to_hex(&underpaid_buyer_address),
         token_network = to_hex(&token_network_address),
     ));
     let connector = spawn_connector(config.path());
@@ -423,7 +474,22 @@ token_network_address = "{token_network}"
         1,
         "the app recorded exactly one write for the fulfilled, correctly-priced packet"
     );
-    assert_eq!(after_paid[0].as_ref(), b"paid write");
+    assert_eq!(after_paid[0].body.as_ref(), b"paid write");
+
+    // ADR 0040 (issue #994), over the whole real path: the app is told
+    // which channel paid for this write, how much, and on what chain --
+    // and the payer is the channel the claim above was actually verified
+    // against, not anything the sender wrote.
+    assert_eq!(
+        recorded_header(&after_paid[0], "x-toon-payer"),
+        Some(format!("evm:{}", paid_channel.0.to_ascii_lowercase()).as_str()),
+        "the app is told which channel paid for this write"
+    );
+    assert_eq!(
+        recorded_header(&after_paid[0], "x-toon-amount"),
+        Some(ROUTE_PRICE.to_string().as_str())
+    );
+    assert_eq!(recorded_header(&after_paid[0], "x-toon-chain"), Some("evm"));
 
     // AC2/AC3: redeem that exact claim against the real chain, through the
     // connector's own operator surface -- not inferred from the fulfil, and
@@ -475,10 +541,10 @@ token_network_address = "{token_network}"
         sealed_prepare_data(b"underpaid write attempt", &connector_identity);
     let underpaid_prepare = sample_prepare("g.example.app", underpaid_data, &underpaid_secret);
     let (underpaid_claim, _) = evm_claim_json(
-        &buyer_secret,
+        &underpaid_buyer_secret,
         &underpaid_channel.0,
         1,
-        underpaid_state.deposited,
+        underpaid_state.counterparty_deposited,
         token_network_address,
     );
     let body = post_ilp_packet(
@@ -552,9 +618,16 @@ async fn an_unaffiliated_buyer_pays_for_a_write_with_no_client_channels_configur
     settlement_key_file
         .write_all(DEPLOYER_PRIVATE_KEY.as_bytes())
         .expect("write settlement key file");
+    // Issue #1186: this node declares no `[[client_channels]]` -- that is the
+    // whole point of the test -- and resolves its buyer's channel from chain
+    // instead. That is exactly the shape whose watermarks used to be allowed
+    // to live in memory, so config load now requires a `state_dir` of it.
+    let state_dir_handle = tempfile::tempdir().expect("temp state dir");
+    let state_dir = state_dir_handle.path().display();
     let config = write_config(&format!(
         r#"
 client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_file}"
@@ -593,10 +666,10 @@ price = {ROUTE_PRICE}
         .await
         .expect("the buyer opens a channel with this connector");
     let state = backend
-        .fund(&channel, 10 * ROUTE_PRICE)
+        .fund_counterparty(&channel, 10 * ROUTE_PRICE)
         .await
         .expect("fund it with real ERC-20 value");
-    assert_eq!(state.deposited, 10 * ROUTE_PRICE);
+    assert_eq!(state.counterparty_deposited, 10 * ROUTE_PRICE);
 
     let client = reqwest::Client::new();
     let (data, shared_secret) = sealed_prepare_data(b"unaffiliated write", &connector_identity);
@@ -626,7 +699,7 @@ price = {ROUTE_PRICE}
         1,
         "the app recorded the unaffiliated buyer's write"
     );
-    assert_eq!(after_paid[0].as_ref(), b"unaffiliated write");
+    assert_eq!(after_paid[0].body.as_ref(), b"unaffiliated write");
 
     // And the guarantee #607 established is intact: a claim on the same,
     // genuinely on-chain channel, signed by somebody who is not its
@@ -844,7 +917,7 @@ async fn an_unaffiliated_solana_buyer_pays_for_a_write_with_no_client_channels_c
         .await
         .expect("read the funded channel back from the chain");
     assert_eq!(
-        state.deposited,
+        state.counterparty_deposited,
         u128::from(deposit_amount),
         "a real transaction genuinely moved this value on chain"
     );
@@ -860,9 +933,16 @@ async fn an_unaffiliated_solana_buyer_pays_for_a_write_with_no_client_channels_c
     // the chain named in `[settlement.solana]`.
     let key_file = write_raw_key_file(60);
     let solana_key_file = write_raw_key_file(61);
+    // Issue #1186: this node declares no `[[client_channels]]` -- that is the
+    // whole point of the test -- and resolves its buyer's channel from chain
+    // instead. That is exactly the shape whose watermarks used to be allowed
+    // to live in memory, so config load now requires a `state_dir` of it.
+    let state_dir_handle = tempfile::tempdir().expect("temp state dir");
+    let state_dir = state_dir_handle.path().display();
     let config = write_config(&format!(
         r#"
 client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_file}"
@@ -901,6 +981,9 @@ price = {SOLANA_ROUTE_PRICE}
     let channel_bytes = channel_pubkey.to_bytes();
     let genuine_nonce = 1u64;
     let genuine_message = connector_signer::solana_balance_proof_message(
+        &Pubkey::from_str(LOCAL_TEST_PROGRAM_ID)
+            .expect("valid local test program id")
+            .to_bytes(),
         &channel_bytes,
         genuine_nonce,
         SOLANA_ROUTE_PRICE,
@@ -908,6 +991,7 @@ price = {SOLANA_ROUTE_PRICE}
     let genuine_signature = buyer.sign_message(&genuine_message);
     let claim = solana_claim_json(
         &channel.0,
+        LOCAL_TEST_PROGRAM_ID,
         genuine_nonce,
         SOLANA_ROUTE_PRICE,
         &base64_encode(genuine_signature.as_ref()),
@@ -932,7 +1016,19 @@ price = {SOLANA_ROUTE_PRICE}
         1,
         "the app recorded the unaffiliated buyer's write"
     );
-    assert_eq!(after_paid[0].as_ref(), b"unaffiliated solana write");
+    assert_eq!(after_paid[0].body.as_ref(), b"unaffiliated solana write");
+
+    // ADR 0040's other chain, end to end: the namespace the app is told
+    // comes from the claim that was verified, so the same handler behind
+    // the same connector says `solana` here and `evm` above.
+    assert_eq!(
+        recorded_header(&after_paid[0], "x-toon-payer"),
+        Some(format!("solana:{}", channel.0).as_str())
+    );
+    assert_eq!(
+        recorded_header(&after_paid[0], "x-toon-chain"),
+        Some("solana")
+    );
 
     // And the guarantee issue #558 established is intact: a claim on the
     // same, genuinely on-chain channel, signed by somebody who is not its
@@ -945,11 +1041,22 @@ price = {SOLANA_ROUTE_PRICE}
     let forged_prepare = sample_prepare("g.example.app", forged_data, &forged_shared);
     let forged_nonce = 2u64;
     let forged_amount = 2 * SOLANA_ROUTE_PRICE;
-    let forged_message =
-        connector_signer::solana_balance_proof_message(&channel_bytes, forged_nonce, forged_amount);
+    // The REAL program id, deliberately: this claim must be refused because
+    // the SIGNER is wrong, not because the program is. Signing it under a
+    // fixture program id would have the gate reject it for the wrong reason
+    // and the test would stop proving what it says it proves.
+    let forged_message = connector_signer::solana_balance_proof_message(
+        &Pubkey::from_str(LOCAL_TEST_PROGRAM_ID)
+            .expect("valid local test program id")
+            .to_bytes(),
+        &channel_bytes,
+        forged_nonce,
+        forged_amount,
+    );
     let forged_signature = forger.sign_message(&forged_message);
     let forged_claim = solana_claim_json(
         &channel.0,
+        LOCAL_TEST_PROGRAM_ID,
         forged_nonce,
         forged_amount,
         &base64_encode(forged_signature.as_ref()),

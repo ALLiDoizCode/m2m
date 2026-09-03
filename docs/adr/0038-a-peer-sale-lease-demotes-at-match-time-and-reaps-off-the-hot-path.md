@@ -1,6 +1,12 @@
 # A peer-sale lease demotes at match time and reaps off the hot path
 
+**Status:** Retired by [0043](0043-purchasable-peering-is-removed.md). It gave expiry to a row shape that no longer exists. [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)'s runtime peer/route table is unaffected and keeps its own durability rules.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
+> **Removed with the feature it bounds, by
+> [ADR 0043](0043-purchasable-peering-is-removed.md).** It solved expiry for a row shape that no longer exists. ADR 0034's runtime peer/route table is
+> unaffected and keeps its own durability rules.
 
 Issue #886 (toon-meta#316, child C3 of #867 "sell peering") gives a purchased peering (issue
 #885, ADR 0037) a lease: a duration bought alongside the price, renewable by paying again,

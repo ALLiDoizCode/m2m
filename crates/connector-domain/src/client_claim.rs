@@ -8,10 +8,10 @@
 //! `validateClaimMessage`/`validateEVMClaim`/`validateSolanaClaim`, not
 //! guessed at.
 //!
-//! Distinct from [`crate::claim::Watermark`]'s peer-wire `WireClaim`: same
+//! Distinct from [`crate::claim::Watermark`]'s peer-role `WireClaim`: same
 //! nonce/watermark rule ([`crate::validate_claim`], [`crate::advance_watermark`]),
 //! a different wire shape and a different channel namespace (a client-edge
-//! claim never touches a peer-wire channel).
+//! claim never touches a peer channel).
 //!
 //! Mina is deliberately excluded from [`ClientClaim`] entirely. ADR 0002
 //! drops Mina from the Rust connector, and this ticket's own acceptance
@@ -230,7 +230,7 @@ pub const SOLANA_NAMESPACE: &str = "solana";
 ///   same account.
 /// * anything else -- identity, byte for byte. A key in no namespace this
 ///   function knows is left exactly as it was found rather than guessed
-///   at: a journal's entry alphabet is shared with the peer wire, whose
+///   at: a journal's entry alphabet is shared with the peer semantics, whose
 ///   channel ids carry no namespace prefix at all, and quietly rewriting
 ///   one of those would be inventing a channel.
 ///
@@ -578,6 +578,13 @@ mod tests {
         )
     }
 
+    /// A conforming fixture: `programId` is a settlement program a channel
+    /// could live under, which is what a payer MUST write there
+    /// (`client-edge-spec.md` §1.3, issue #1127). It was the **system
+    /// program** until now -- no channel lives under that, so this shared
+    /// structural validator's own example was the one value the pinned rule
+    /// excludes. Nothing here consults the field (that is the caller's job,
+    /// and only the client edge does it), so no assertion moves.
     fn solana_claim_json() -> &'static str {
         r#"{
             "version": "1.0",
@@ -585,7 +592,7 @@ mod tests {
             "messageId": "claim-2",
             "timestamp": "2026-02-02T12:00:00Z",
             "senderId": "peer-carol",
-            "programId": "11111111111111111111111111111111",
+            "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
             "channelAccount": "So11111111111111111111111111111111111111112",
             "nonce": 3,
             "transferredAmount": "42",
@@ -791,7 +798,7 @@ mod tests {
         );
     }
 
-    /// A key in no namespace this function knows -- a peer-wire channel id
+    /// A key in no namespace this function knows -- a peer channel id
     /// sharing the journal's entry alphabet, say -- is returned byte for
     /// byte. Rewriting one would be inventing a channel.
     #[test]
@@ -831,6 +838,27 @@ mod tests {
         }"#;
         let err = parse_client_claim(json).unwrap_err();
         assert!(matches!(err, ClientClaimError::Malformed(_)));
+    }
+
+    /// The Solana half of the case above, on the one field issue #1127
+    /// pinned. `programId` names the settlement program the
+    /// `channelAccount` lives under (`client-edge-spec.md` §1.3), and it is
+    /// **required**: a claim that omits it declares no program at all, which
+    /// is a different and worse thing than declaring the wrong one. Only the
+    /// EVM shape had a missing-field test before, so the required-ness of
+    /// this field rested on `required_str`'s implementation alone.
+    #[test]
+    fn a_solana_claim_with_no_program_id_is_malformed() {
+        let without = solana_claim_json().replace(
+            r#""programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA","#,
+            "",
+        );
+        assert!(
+            !without.contains("programId"),
+            "the field really was removed"
+        );
+        let err = parse_client_claim(&without).unwrap_err();
+        assert!(matches!(err, ClientClaimError::Malformed(_)), "{err:?}");
     }
 
     #[test]

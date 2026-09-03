@@ -44,16 +44,6 @@ pub const PAYOUT_CLAIM_PROTOCOL: &str = "payout-claim";
 /// the RESPONSE that already answers the claim-bearing MESSAGE or TRANSFER,
 /// never a frame of its own. Its HTTP twin is `Toon-Claim-Ack` (#728).
 pub const CLAIM_ACK_PROTOCOL: &str = "claim-ack";
-/// The original sender's minimum-delivery declaration
-/// (`peer-carriage-spec.md` §3, §5.1), decimal uint64 as UTF-8 text on a
-/// peer MESSAGE. Its HTTP twin is `Toon-Minimum-Delivery` (#728).
-///
-/// Declared here beside the other entry names rather than in a peer module
-/// for spec I2's reason: the BTP name and the HTTP name for one concept are
-/// a pair, and a second `const` spelling either of them somewhere else is
-/// exactly the fork issue #713 was opened to prevent.
-pub const MINIMUM_DELIVERY_PROTOCOL: &str = "toon-minimum-delivery";
-
 /// The HTTP twin of each entry name above, in its canonical lower-case form
 /// (`peer-carriage-spec.md` §3; header names match case-insensitively per
 /// RFC 9110, and the canonical form is the one the vectors pin).
@@ -83,8 +73,6 @@ pub const MINIMUM_DELIVERY_PROTOCOL: &str = "toon-minimum-delivery";
 pub const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
 /// The HTTP twin of [`CLAIM_ACK_PROTOCOL`] (§3, §6.1).
 pub const CLAIM_ACK_HEADER: &str = "toon-claim-ack";
-/// The HTTP twin of [`MINIMUM_DELIVERY_PROTOCOL`] (§3, §5.1).
-pub const MINIMUM_DELIVERY_HEADER: &str = "toon-minimum-delivery";
 /// The HTTP twin of [`ACCUMULATED_COST_PROTOCOL`] (§3, §5.2) -- already
 /// implemented on the client edge and reused verbatim.
 pub const ACCUMULATED_COST_HEADER: &str = "toon-accumulated-cost";
@@ -92,7 +80,7 @@ pub const ACCUMULATED_COST_HEADER: &str = "toon-accumulated-cost";
 /// §1.4) -- the client edge's own `402` header spelling, reused verbatim by
 /// the peer carriage that answers an uncovered peer PREPARE with the same
 /// greeting (issue #880). Declared here rather than spelled at either use
-/// site so the two halves stay a pair, exactly like the four above.
+/// site so the two halves stay a pair, exactly like the three above.
 pub const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
 /// **The one field with no BTP twin** (§3, §6.4): the flush prompt a payee
 /// that cannot originate MAY set on a response. BTP needs none, because on
@@ -136,11 +124,6 @@ pub const CARRIAGE_NAMES: &[CarriageNames] = &[
         concept: "claim-ack",
         btp_protocol_entry: CLAIM_ACK_PROTOCOL,
         http_header: CLAIM_ACK_HEADER,
-    },
-    CarriageNames {
-        concept: "minimum-delivery",
-        btp_protocol_entry: MINIMUM_DELIVERY_PROTOCOL,
-        http_header: MINIMUM_DELIVERY_HEADER,
     },
     CarriageNames {
         concept: "accumulated-cost",
@@ -636,14 +619,6 @@ mod tests {
             CLAIM_ACK_PROTOCOL
         );
         assert_eq!(by_concept("claim-ack").http_header, CLAIM_ACK_HEADER);
-        assert_eq!(
-            by_concept("minimum-delivery").btp_protocol_entry,
-            MINIMUM_DELIVERY_PROTOCOL
-        );
-        assert_eq!(
-            by_concept("minimum-delivery").http_header,
-            MINIMUM_DELIVERY_HEADER
-        );
         assert_eq!(
             by_concept("accumulated-cost").http_header,
             ACCUMULATED_COST_HEADER

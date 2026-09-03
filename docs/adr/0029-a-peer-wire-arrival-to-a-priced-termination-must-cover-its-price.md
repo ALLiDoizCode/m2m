@@ -1,5 +1,7 @@
 # A peer-wire arrival to a priced termination must cover its price, per packet, before delivery
 
+**Status:** Accepted in part. The per-packet `F03` price-coverage check **stands and is live**. Every citation of the exposure ceiling and `T04` as separate, still-live machinery is retired by [0033](0033-the-exposure-machinery-is-retired-not-restated.md), and the claim-exchange premise it reasons from — a claim rides the _next_ packet — is superseded by [0042](0042-a-packet-carries-its-claim.md). The decision survives both, because it needs only that a hop cannot increase an amount while forwarding.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 > **The exposure ceiling and `T04` this ADR references throughout as already-existing, unaffected
@@ -34,12 +36,12 @@ collects everything, the store earns nothing) if the store box cannot itself ver
 
 Two questions were explicitly left open by the issue for whoever closed it:
 
-1. **Mechanism.** The peer wire's claim exchange is not per-packet (`peer-wire-spec.md` §3.2 — a
+1. **Mechanism.** The peer wire's claim exchange is not per-packet (`peer-semantics-pre-868.md` §3.2 — a
    claim rides the _next_ packet, trailing the fulfilment that created the obligation) while a
    price is inherently per-delivery. Checking a price against a running, trailing balance is not the
    same operation as checking it against a single claim the way the client edge's `ClientClaimGate`
    does.
-2. **Per-packet refusal, or relation-level throttle?** `peer-wire-spec.md` §5.3's `T04` ceiling
+2. **Per-packet refusal, or relation-level throttle?** `peer-semantics-pre-868.md` §5.3's `T04` ceiling
    already throttles a whole peering relation once its unclaimed exposure grows too large. The issue
    asked whether an underpriced arrival should be answered the same way, as a property of the
    relation, rather than of the one packet.
@@ -49,11 +51,18 @@ Two questions were explicitly left open by the issue for whoever closed it:
 **The check is per-packet, and it is answered from the PREPARE already in hand — not from the claim
 exchange at all.**
 
-Value on the peer wire moves by [ADR 0004](0004-value-moves-on-fulfilment.md): a PREPARE's `amount`
-is exactly what becomes owed to this connector, as exposure, the moment it fulfils
-(`peer-wire-spec.md` §3.2, `Connector::handle_peer_prepare`'s `record_inbound_delivery`). That
+Value on the peer path moved, when this was written, by
+[ADR 0004](0004-value-moves-on-fulfilment.md) — superseded twice since, and the reasoning below
+survives both: [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md) deleted the
+exposure accounting this paragraph names, and
+[ADR 0042](0042-a-packet-carries-its-claim.md) retired the "moves on fulfilment" headline for a
+packet that carries its own claim. What the argument actually needs is only that a hop cannot
+increase an amount while forwarding, which is untouched by either. As originally written: a
+PREPARE's `amount` is exactly what becomes owed to this connector, as exposure, the moment it
+fulfils
+(`peer-semantics-pre-868.md` §3.2, `Connector::handle_peer_prepare`'s `record_inbound_delivery`). That
 `amount` already carries the answer this ticket needs — a hop cannot increase it forwarding
-(`peer-wire-spec.md` §4: outgoing amount is always incoming amount minus fee), so if the amount
+(`peer-semantics-pre-868.md` §4: outgoing amount is always incoming amount minus fee), so if the amount
 arriving at a termination is at least that route's price, whatever exposure this delivery creates is
 guaranteed to be at least that route's price too, and the ordinary claim exchange that later covers
 that exposure (§3.2–§3.4) is guaranteed to cover the route's price as a consequence — with no new
@@ -71,7 +80,7 @@ after the exposure-ceiling check and before calling `Connector::handle_prepare`:
 - `price = 0` never gates. An operator's deliberate free termination (ADR 0020) stays free reached
   from a peer, exactly as it stays free reached from a client.
 - A rejected arrival never opens the wrap, never reaches the app, and records no exposure — the app
-  did no work, so nothing accumulates (`peer-wire-spec.md` §5.2's existing "no value added" rule,
+  did no work, so nothing accumulates (`peer-semantics-pre-868.md` §5.2's existing "no value added" rule,
   which this decision adds a new member to) and the sending peer is not charged for a delivery that
   never happened.
 
@@ -134,3 +143,31 @@ An operator who terminates the same route behind two doors at two different pric
 issue #557's free-gateway guard and the live `g.toon.relay` incident both name) is unaffected by this
 decision specifically — it does not reconcile two prices for one handler, only whether one path's own
 declared price was met by what it received.
+
+## Update (issue #1143) — the two `R01` citations are deleted; this decision is strengthened
+
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) retires minimum delivery, and
+issue #1143 deletes it. Two sentences here cite it and are dead: `R01`'s minimum-delivery check in
+the list of refusals this wire already takes, and the reject-taxonomy case comparing a peer that
+sends too little to _"a PREPARE this hop cannot forward at the declared minimum delivery"_. `R01`
+has left the reject vocabulary entirely; the surviving members of that list — ADR 0028's `F03`
+over-carry cap, and this record's own `F03` — are unaffected.
+
+**The decision itself is strengthened, not disturbed.** "A peer arrival at a priced termination
+covers that price" is precisely what 0057 generalises to the forwarded case: every crossing is
+covered by a claim, so what a hop passes on is bounded by what it was paid rather than by a figure
+it was handed and trusted to check.
+
+## Update (issue #1143, corrected) — `R01` did not leave the vocabulary
+
+_"`R01` has left the reject vocabulary entirely"_ above is wrong; see
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)'s corrected Update and
+[0051](0051-a-reject-code-binds-where-a-sender-must-act-differently.md)'s corrected row. Its
+minimum-delivery meaning left; RFC 0027's own — a hop whose fee alone exceeds the arriving amount has
+_"too little to forward"_ — did not, and a forwarding hop still raises it.
+
+**Both deletions this record made are still right**, because both cited the floor rather than the
+code: the minimum-delivery check in the list of refusals this wire takes, and the reject-taxonomy
+comparison to _"a PREPARE this hop cannot forward at the declared minimum delivery"_. The list is
+simply longer than that update said — ADR 0028's `F03` over-carry cap, this record's own `F03`, and
+`R01` in its RFC 0027 sense. This record's decision is untouched either way.

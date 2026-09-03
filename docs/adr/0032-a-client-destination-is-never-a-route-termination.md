@@ -1,5 +1,7 @@
 # A client destination is never a route termination
 
+**Status:** Accepted. Bounds [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md) and [0019](0019-a-terminating-connector-derives-the-fulfilment.md). Live: `session_route::route_prepare`.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 ADR 0018's "sealed to the terminating connector" and ADR 0019's "the terminating connector derives

@@ -6,8 +6,11 @@
 //! connector derives that itself from the sealed request, entirely above
 //! this app's own boundary.
 //!
-//! Built for the end-to-end test in `tests/two_connectors_and_a_stub_app.rs`,
-//! but it is an ordinary standalone process like the real connector binary:
+//! Built for an end-to-end test that has since been replaced (ADR 0027
+//! deleted the raw-TCP transport it proved), and now the app behind the route
+//! in `local/`'s topologies -- where being payment-oblivious is the whole
+//! point: the connector in front of it is the only thing that knows a packet
+//! was paid for. It is an ordinary standalone process like the real binary:
 //! `stub-app [bind-addr]`, defaulting to `127.0.0.1:0` so the OS picks a free
 //! port, printed to stdout once bound.
 

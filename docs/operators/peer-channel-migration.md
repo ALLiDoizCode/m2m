@@ -1,5 +1,11 @@
 # Migrating the apex↔store peer channel to the new TokenNetwork
 
+> **Superseded by issue #872** (toon-meta#310 / toon-meta#313's live cutover): the apex box is
+> destroyed and the apex↔store peering this runbook migrates — the `[[peers]]`/`[[peer_channels]]`
+> rows it names, on both sides — no longer exists in any committed config. There is no channel left
+> to migrate. Kept as the historical record of the ERC-2771 TokenNetwork split-brain and how it was
+> resolved while the peering was still live.
+
 Operator runbook for [issue #822](https://github.com/toon-protocol/connector/issues/822): the
 apex↔store `[[peer_channels]]` row still settles on the OLD `TokenNetwork`
 (`0x1E95493fEF46707E034b4a1945f25a8C76A1823D`) after the ERC-2771 cutover (#695/#811) repointed
@@ -84,8 +90,8 @@ rollback means reverting the edit, not the on-chain state.
    `mint(address,uint256)` is ungated (`infra/linode/endpoints.json`'s own note), so a funded
    deployer key can mint directly instead.
 2. **Open the new channel.** Either participant calls
-   `openChannel(address participant2, uint256 settlementTimeout)` on the new `TokenNetwork`
-   (`0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478`) naming the _other_ participant's settlement
+   `openChannel(address participant2, uint256 settlementTimeout)` on the live `TokenNetwork`
+   (`0xe9E05dfecfe165266C88d73e61D483612651952a` since the 2026-08-28 ADR 0059 cutover; `docs/evm-deployment.md`) naming the _other_ participant's settlement
    address, with a `settlementTimeout` at least as long as the retired channel's — read that value
    off the OLD `TokenNetwork`'s `channels(bytes32)` rather than assuming the 1-hour contract
    minimum. Record the returned `channelId`: it is emitted in `ChannelOpened` and is the value both
@@ -141,7 +147,7 @@ rollback means reverting the edit, not the on-chain state.
 ## Gates — in order
 
 - **(a) The new channel is funded and `Opened`** before either config is touched (Order steps 1-4).
-  Nothing on the peer wire catches this for you: its four reject reasons (`signature_invalid`,
+  Nothing on the peer semantics catches this for you: its four reject reasons (`signature_invalid`,
   `nonce_not_advancing`, `amount_not_advancing`, `unknown_channel`) all judge the claim, not the
   chain, so both boxes will happily sign and accept claims against a channel that does not exist or
   cannot cover them, and the failure only surfaces when `claimFromChannel` reverts — after the

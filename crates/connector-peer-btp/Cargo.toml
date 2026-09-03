@@ -18,6 +18,7 @@ connector-peer-auth = { path = "../connector-peer-auth" }
 connector-domain = { path = "../connector-domain" }
 connector-runtime = { path = "../connector-runtime" }
 connector-signer = { path = "../connector-signer" }
+arc-swap = "1.9.2"
 async-trait = "0.1"
 base64 = "0.22"
 # Solana peer-claim identities render as base58 (issue #742), the same
@@ -45,3 +46,12 @@ url = "2"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 libsecp256k1 = "0.6"
+# A genuinely signed Solana balance proof, for the tests that hold what
+# this carriage does with a peer claim's declared `programId`
+# (`tests/a_peer_claims_declared_program_is_not_consulted.rs`). The same
+# ed25519-dalek `connector-signer` verifies with, so a test cannot pass
+# against a second implementation of the signature.
+ed25519-dalek = "1"
+# `Config::load` reads a file, so the two config-driven carriage tests
+# write a real TOML and a real key file rather than hand-building a value.
+tempfile = "3"

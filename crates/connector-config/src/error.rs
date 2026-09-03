@@ -1,6 +1,8 @@
 use std::net::AddrParseError;
 use std::path::PathBuf;
 
+use connector_domain::Price;
+
 use thiserror::Error;
 
 /// Every way [`crate::Config::load`] can fail.
@@ -66,14 +68,19 @@ pub enum ConfigError {
     SignerKmsIdEmpty,
 
     #[error(
-        "the [operator] section is present but bearer_token is empty: \
-         the operator surface would have no read authentication"
+        "the [operator] section is present but names no bearer token, or an empty one: the \
+         operator surface would have no read authentication. Set exactly one of \
+         'bearer_token_file = \"/app/data/…\"' (what a deployed node should use -- this \
+         repository is public, so a committed config must not carry the literal) or \
+         'bearer_token = \"…\"'"
     )]
     OperatorMissingBearerToken,
 
     #[error(
-        "the [operator] section is present but write_keys is empty: \
-         the operator surface would accept writes from no one"
+        "the [operator] section is present but names no write keys: the operator surface \
+         would accept writes from no one. Set exactly one of 'write_keys_file = \
+         \"/app/data/…\"' (the deployed form -- a file an operator can edit to revoke, which \
+         a committed literal is not) or 'write_keys = [\"…\"]'"
     )]
     OperatorNoWriteKeys,
 
@@ -82,6 +89,67 @@ pub enum ConfigError {
          (a 32-byte ed25519 public key)"
     )]
     OperatorInvalidWriteKey { value: String },
+
+    #[error(
+        "the [operator] section sets both '{literal}' and '{file}': exactly one of them says \
+         where this setting's value comes from, and two answers is not a merge -- it is an \
+         unanswerable question about which one gates the operator surface, with the losing \
+         value left in the file looking authoritative. Keep '{file}' (the deployed form -- \
+         this repository is public, so a committed config must not carry the literal) and \
+         delete '{literal}'; see docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorSettingAmbiguous {
+        literal: &'static str,
+        file: &'static str,
+    },
+
+    #[error(
+        "the [operator] section sets '{setting} = {path}', which does not exist or is not a \
+         file: an operator surface that cannot read its own authentication authenticates \
+         nobody, so this is refused at load rather than becoming a surface that is enabled \
+         and quietly rejects every request. The path is resolved the same way '[signer] \
+         key_file' is -- relative to the process's working directory, so write an absolute \
+         path; see docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorFileNotFound {
+        setting: &'static str,
+        path: PathBuf,
+    },
+
+    #[error(
+        "the [operator] section sets '{setting} = {path}', which could not be read as text: \
+         {source} -- check the file's permissions inside the container (a secret file is \
+         usually mode 600 and must be owned by the uid the connector runs as); see \
+         docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorFileUnreadable {
+        setting: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error(
+        "the [operator] section sets '{setting} = {path}', which carries nothing once \
+         whitespace and comments are stripped: an empty file is the same unauthenticated \
+         surface an empty literal would be, and a truncated or half-written file is the usual \
+         cause -- rewrite it; see docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorFileEmpty {
+        setting: &'static str,
+        path: PathBuf,
+    },
+
+    #[error(
+        "invalid operator write_keys_file entry at {path}:{line}: '{value}' must be 64 hex \
+         characters (a 32-byte ed25519 public key). One key per line, '#' starts a comment; \
+         see docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorWriteKeysFileInvalidKey {
+        path: PathBuf,
+        line: usize,
+        value: String,
+    },
 
     #[error(
         "route '{prefix}' must set exactly one of 'handler_url' or 'peer_id', but neither is set"
@@ -102,18 +170,27 @@ pub enum ConfigError {
     )]
     RouteMissingPrice { prefix: String, handler_url: String },
 
+    /// ADR 0061's removed-field row. A fee attaches to a **peering**, not to
+    /// a route: what this hop retains is the same number whichever prefix
+    /// the packet was addressed to, so it belongs on the `[[peers]]` row
+    /// that names the counterparty. Refused on **any** route, terminated or
+    /// forwarded -- the narrower `TerminatedRouteHasFee` this replaces let a
+    /// forwarded route keep writing one, which is exactly the spelling ADR
+    /// 0061 moves.
     #[error(
-        "route '{prefix}' terminates locally and sets 'fee = {fee}', which only a route \
-         forwarding to a 'peer_id' can charge (ADR 0010) -- a terminating app's work is paid \
-         for by 'price'. Remove the 'fee', or write 'price = {fee}' if that is what was meant"
+        "route '{prefix}' sets 'fee', which moved to the '[[peers]]' row it was always about \
+         (ADR 0061): a fee is what this hop retains for carrying one packet to a counterparty, \
+         and that is the same number whichever prefix is addressed. Delete it here and write \
+         'fee' on the '[[peers]]' entry this route's 'peer_id' names -- a terminating route \
+         never had one to move, since an app's work is paid for by 'price'"
     )]
-    TerminatedRouteHasFee { prefix: String, fee: u64 },
+    RouteFeeRemoved { prefix: String },
 
     #[error(
         "route '{prefix}' forwards to peer '{peer_id}' but sets no 'price': a forwarded route \
          is never silently free either (ADR 0028) -- 'price' is what this connector's client \
-         edge charges a client for a packet to this prefix, and 'fee' is only what this hop \
-         retains of it. Set 'price = 0' if free carriage is deliberate"
+         edge charges a client for a packet to this prefix, and the peering's own 'fee' is \
+         only what this hop retains of it. Set 'price = 0' if free carriage is deliberate"
     )]
     PeerRouteMissingPrice { prefix: String, peer_id: String },
 
@@ -139,9 +216,9 @@ pub enum ConfigError {
     ConflictingHandlerPrice {
         handler_url: String,
         first_prefix: String,
-        first_price: u64,
+        first_price: Price,
         second_prefix: String,
-        second_price: u64,
+        second_price: Price,
     },
 
     #[error(
@@ -153,8 +230,8 @@ pub enum ConfigError {
     PeerIdEmpty,
 
     #[error(
-        "duplicate peer id '{id}': two '[[peers]]' entries name it, so which credential and \
-         endpoint apply to it is unanswerable -- see \
+        "duplicate peer id '{id}': two '[[peers]]' entries name it, so which endpoint, fee \
+         and cap apply to it is unanswerable -- see \
          docs/operators/btp-peer-transport-bringup.md"
     )]
     DuplicatePeerId { id: String },
@@ -170,17 +247,31 @@ pub enum ConfigError {
     )]
     InvalidPeerExposure { value: String },
 
-    /// Issue #883 (B6): the migration knob, spelled wrong. A mistyped value
-    /// must not silently read as the default -- see
-    /// [`crate::peer::ClaimEnforcement`]'s own documentation for why the
-    /// field is temporary.
+    /// ADR 0042 (item 3): the forwarded-arrival migration knob, spelled
+    /// wrong. Refused by name rather than falling through to the default,
+    /// because the default here is the permissive one -- a typo meant as
+    /// "enforce" would leave this peering carrying forwards for free.
     #[error(
-        "invalid claim_enforcement value '{value}' for peer '{id}': a peer sets 'enforce' \
-         (refuse an uncovered peer PREPARE, the default) or 'observe' (admit and log it -- the \
-         rollout's own migration-only canary step, issue #883). Omit the field for the default \
-         ('enforce'); see docs/operators/claim-policy-rollout.md"
+        "invalid forwarded_claim_enforcement value '{value}' for peer '{id}': a peer sets \
+         'observe' (admit an uncovered forwarded arrival and log it -- the default, because the \
+         fleet's send halves are not live yet) or 'enforce' (refuse it with the x402 greeting, \
+         ADR 0042's permanent rule). Omit the field for the default ('observe'); see \
+         docs/operators/claim-policy-rollout.md"
     )]
-    InvalidClaimEnforcement { id: String, value: String },
+    InvalidForwardedClaimEnforcement { id: String, value: String },
+
+    /// ADR 0042's cap, written as `0`. A cap of zero refuses every packet
+    /// this peering could carry, so it is a peering that silently does
+    /// nothing -- and there is deliberately no spelling that turns the cap
+    /// off, since the whole point of the rule is that a bound always
+    /// exists.
+    #[error(
+        "max_packet_amount = 0 for peer '{id}': the cap is the largest amount this connector \
+         will forward to a peer in ONE packet (ADR 0042), so zero refuses every packet that \
+         peering could ever carry. Write a positive amount in the settlement asset's base \
+         units, or omit the field for the default"
+    )]
+    PeerMaxPacketAmountZero { id: String },
 
     #[error(
         "invalid endpoint '{value}' for peer '{id}': {source} -- a peer endpoint is a URL \
@@ -197,7 +288,7 @@ pub enum ConfigError {
     #[error(
         "endpoint '{value}' for peer '{id}' has scheme '{scheme}', which selects no peer \
          carriage: 'wss://' selects BTP and 'https://' selects ILP-over-HTTP, and there is no \
-         third one (ADR 0027 deleted the raw-TCP peer wire). Both are TLS-only because a \
+         third one (ADR 0027 deleted the raw-TCP transport). Both are TLS-only because a \
          peering carries signed balance proofs (ADR 0004), so 'ws://' and 'http://' are not \
          accepted either; see docs/operators/btp-peer-transport-bringup.md"
     )]
@@ -208,61 +299,19 @@ pub enum ConfigError {
     },
 
     #[error(
-        "peer '{id}' configures no credential, or an empty one: role is decided by \
-         authentication (peer-carriage-spec.md §1.2), and an empty secret matches nothing -- \
-         so this peering could only ever admit its counterparty as an ordinary client, \
-         silently. Set exactly one of 'credential = {{ secret_file = \"/app/data/…\" }}' (what a \
-         deployed node should use -- this repository is public, so a committed config must not \
-         carry the literal) or 'credential = {{ secret = \"…\" }}'; see \
-         docs/operators/btp-peer-transport-bringup.md"
+        "peer '{id}' sets 'credential': the '{{peerId, secret}}' shared secret is deleted (ADR \
+         0060). A peering is proven by a verified claim on one of its '[[peer_channels]]' \
+         rows, not by a string both operators wrote into their own config files, and there is \
+         no replacement key -- not renamed, not optional. Delete the 'credential' table from \
+         this peer; see docs/protocol/peer-carriage-spec.md §1.2"
     )]
-    PeerCredentialMissing { id: String },
+    PeerCredentialRemoved { id: String },
 
     #[error(
-        "peer '{id}' sets both 'secret' and 'secret_file' on its credential: exactly one of \
-         them says where this peering's shared secret comes from, and two answers is not a \
-         merge -- it is an unanswerable question about which one authenticates the peering. \
-         Keep 'secret_file' (the deployed form) and delete the literal; see \
-         docs/operators/btp-peer-transport-bringup.md"
-    )]
-    PeerCredentialAmbiguous { id: String },
-
-    #[error(
-        "peer '{id}' sets 'secret_file = {path}', which does not exist or is not a file: a \
-         peering whose secret cannot be read authenticates nobody, so this is refused at load \
-         rather than becoming a peering that silently admits its counterparty as an ordinary \
-         client. The path is resolved the same way '[signer] key_file' is -- relative to the \
-         process's working directory, so write an absolute path; see \
-         docs/operators/btp-peer-transport-bringup.md"
-    )]
-    PeerSecretFileNotFound { id: String, path: PathBuf },
-
-    #[error(
-        "peer '{id}' sets 'secret_file = {path}', which could not be read as text: {source} -- \
-         check the file's permissions inside the container (a secret file is usually mode 600 \
-         and must be owned by the uid the connector runs as); see \
-         docs/operators/btp-peer-transport-bringup.md"
-    )]
-    PeerSecretFileUnreadable {
-        id: String,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error(
-        "peer '{id}' sets 'secret_file = {path}', which is empty once trailing whitespace is \
-         trimmed: an empty secret matches nothing (peer-carriage-spec.md §1.2), so this is the \
-         same silent non-peering 'secret = \"\"' would be. A truncated file is the usual cause \
-         -- regenerate it, e.g. 'openssl rand -hex 32 > {path}'; see \
-         docs/operators/btp-peer-transport-bringup.md"
-    )]
-    PeerSecretFileEmpty { id: String, path: PathBuf },
-
-    #[error(
-        "peer '{id}' has no '[[peer_channels]]' entry: a peer role needs both a proven \
-         credential and a channel binding (peer-carriage-spec.md §1.2 P2), so without one this \
-         peering can never take the peer role and its claims would be judged as a stranger's. \
+        "peer '{id}' has no '[[peer_channels]]' entry: a peer role needs a channel binding \
+         and a verified claim on one of its channels (peer-carriage-spec.md §1.2 P2/P3), so \
+         without one this peering can never take the peer role and its claims would be judged \
+         as a stranger's. \
          This is the surface whose absence made ADR 0024 inert (issue #620); see \
          docs/operators/btp-peer-transport-bringup.md"
     )]
@@ -283,6 +332,176 @@ pub enum ConfigError {
          docs/operators/btp-peer-transport-bringup.md"
     )]
     ChannelInBothNamespaces { value: String },
+
+    // -- `[[pay_channels]]` (ADR 0042 item 2, issue #881): the channel this
+    // node PAYS a next hop from, as an ordinary client of it. See
+    // `crate::pay_channel`'s module header for why this is a third table
+    // rather than a row in either of the two above.
+    #[error(
+        "'[[pay_channels]]' names peer_id '{peer_id}', which no '[[peers]]' entry configures -- \
+         a channel that pays a peering that does not exist pays nobody. This table is how this \
+         node covers every PREPARE it forwards to a hop (ADR 0042); the hop is named by the \
+         same '[[peers]]' id a route's peer_id names"
+    )]
+    PayChannelOrphaned { peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' names channel '{value}', which is not a \
+         32-byte on-chain channel id: it must be 64 hex characters, optionally '0x'-prefixed. \
+         This is the channel this node PAYS that hop from as an ordinary client of it"
+    )]
+    PayChannelInvalidId { peer_id: String, value: String },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' has an invalid {field} '{value}': it must be a \
+         20-byte EVM address, optionally '0x'-prefixed. It is half of the EIP-712 domain the \
+         covering claim is signed under, and a claim signed under the wrong domain recovers to \
+         a different address and is refused at the far gate"
+    )]
+    PayChannelInvalidAddress {
+        peer_id: String,
+        field: &'static str,
+        value: String,
+    },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' has an unusable client_edge_url '{value}': \
+         {source}. It is that hop's own 'POST /ilp' endpoint -- where this node arrives as an \
+         ordinary buyer, and where 'POST /ilp/claim-state' (issue #693) answers where this \
+         node's claims on the channel stand"
+    )]
+    PayChannelInvalidClientEdgeUrl {
+        peer_id: String,
+        value: String,
+        #[source]
+        source: url::ParseError,
+    },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' has client_edge_url '{value}', whose scheme \
+         '{scheme}' is not one this node may ask a channel's claim state over: it must be \
+         'https://' (or 'http://' with peer_allow_plaintext_endpoints, which is a loopback and \
+         test setting). The ask carries a signed challenge -- an EIP-712 digest on EVM, an ed25519 \
+         message on Solana, and on either chain a capability to read a channel's state -- so it is \
+         TLS-only by default. A peering's own 'wss://' endpoint is \
+         not this URL and is never turned into it by swapping scheme and appending a path \
+         (ADR 0030)"
+    )]
+    PayChannelClientEdgeUrlScheme {
+        peer_id: String,
+        value: String,
+        scheme: String,
+    },
+
+    #[error(
+        "'[[pay_channels]]' names peer '{peer_id}' twice: the outbound client ledger keeps one \
+         nonce line per next hop, so a second row would be a second channel for one line and \
+         which one signed would depend on file order"
+    )]
+    PayChannelDuplicatePeer { peer_id: String },
+
+    #[error(
+        "channel '{value}' is named by two '[[pay_channels]]' rows: one channel paid from by \
+         two next hops is one channel carrying two nonce lines, and the far gate resolves that \
+         by refusing one of them as a replay"
+    )]
+    PayChannelDuplicate { value: String },
+
+    #[error(
+        "channel '{value}' is configured in both '[[pay_channels]]' and '[[client_channels]]': \
+         '[[client_channels]]' is channels this node RECEIVES claims on and '[[pay_channels]]' \
+         is one it PAYS from, so one channel in both roles is the same double-count \
+         'ChannelInBothNamespaces' refuses between the peer and client books (ADR 0030, \
+         peer-carriage-spec.md §1.8)"
+    )]
+    PayChannelIsAlsoAClientChannel { value: String },
+
+    #[error(
+        "'[[pay_channels]]' names peer '{peer_id}' but this node has no '[settlement.evm]' \
+         table: a covering claim is an EIP-712 balance proof signed by the channel's on-chain \
+         participant, which IS this node's settlement address -- the same key ADR 0024's \
+         outbound peer claims use. There is no second key to configure and none is invented \
+         (ADR 0030)"
+    )]
+    PayChannelWithoutEvmSettlement { peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' has an invalid {field} '{value}': it must be a \
+         base58-encoded 32-byte Solana address. It is the channel account every covering claim \
+         on this row signs over (ADR 0053), and one that does not decode is a claim the far \
+         gate verifies against a different account"
+    )]
+    PayChannelInvalidSolanaAccount {
+        peer_id: String,
+        field: &'static str,
+        value: String,
+    },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' names a 'program_id', which this table does \
+         not declare: the settlement program a covering claim is signed under is \
+         '[settlement.solana] program_id' and nothing else -- the one program this node can \
+         redeem through, and since ADR 0053 part of what every claim signs. Remove the key \
+         (issue #1128's rule, and the same one '[[peer_channels]]' and '[[client_channels]]' \
+         already hold)"
+    )]
+    PayChannelProgramIdNotDeclared { peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' names a Solana channel for peer '{peer_id}' but this node has no \
+         '[settlement.solana]' table: a covering claim on Solana is an ed25519 balance proof \
+         signed by the channel's on-chain participant -- '[settlement.solana.key]'s key -- \
+         under '[settlement.solana] program_id', and neither exists to read. There is no \
+         second key to configure and none is invented (ADR 0030)"
+    )]
+    PayChannelWithoutSolanaSettlement { peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' names a Solana channel for peer '{peer_id}', but '[settlement.solana] \
+         program_id' is '{value}', which is not a base58-encoded 32-byte address. ADR 0053 signs \
+         that program id into every claim on the channel, so it has to be a real address before \
+         a claim can be minted at all -- not only when the settlement backend first dials a chain"
+    )]
+    PayChannelSolanaSettlementProgramIdInvalid { peer_id: String, value: String },
+
+    #[error(
+        "'[[pay_channels]]' names Solana channel '{value}' for peer '{peer_id}', which has no \
+         Solana '[[peer_channels]]' row for that same peering. Unlike an EVM claim's optional \
+         EIP-712 domain, a Solana claim's 'programId' is a REQUIRED wire field, and the peer \
+         carriage renders it from that peering's Solana peer-channel row -- so this row would \
+         mint claims that could not be put on the wire at all. Holding one channel in both \
+         roles with one hop is the deployed shape (the peer role for what arrives, the client \
+         role for what this node sends); add the matching '[[peer_channels]]' row"
+    )]
+    PayChannelSolanaWithoutPeerChannel { peer_id: String, value: String },
+
+    #[error(
+        "peer '{peer_id}' is the next hop of route '{prefix}' but has no '[[pay_channels]]' \
+         entry: a connector covers every PREPARE it sends (ADR 0042), so a peering this node \
+         FORWARDS to must name the channel it pays that hop from. There is no postpay \
+         fallback any more -- ADR 0004's 'the claim covering crossing n rides crossing n + 1' \
+         was deleted in issue #1145 -- so without this row every packet on that route would be \
+         refused at packet time. Add:\n\
+         \n\
+             [[pay_channels]]\n\
+             peer_id = \"{peer_id}\"\n\
+             # EVM:    channel_id / chain_id / token_network\n\
+             # Solana: channel_account (and a Solana '[[peer_channels]]' row for the same \
+         channel)\n\
+             client_edge_url = \"<that hop's own POST /ilp endpoint>\"\n\
+         \n\
+         This key is newly REQUIRED, which by ADR 0009 makes it a breaking deploy: land the \
+         config before moving the image tag, never the other way round"
+    )]
+    PayChannelUnbound { prefix: String, peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' is configured but 'state_dir' is not: the outbound client ledger \
+         keeps the highest nonce it has ever ISSUED to each next hop, and it has to outlive the \
+         process -- a restart that reissued a nonce would fork this node's own outbound nonce \
+         line and the far gate would refuse one of the two claims as a replay"
+    )]
+    PayChannelsWithoutStateDir,
 
     #[error(
         "route '{prefix}' forwards to peer '{peer_id}', which this connector can never \
@@ -317,21 +536,107 @@ pub enum ConfigError {
     #[error("[[peer_channels]] names channel '{value}' more than once")]
     PeerChannelDuplicate { value: String },
 
+    /// An EVM `[[peer_channels]]` row on a node with no `[settlement.evm]`
+    /// table (issue #1138) -- the EVM twin of
+    /// [`ConfigError::PeerChannelWithoutSolanaSettlement`], under the one
+    /// rule `crate::settlement::SettlementTables` states for all four
+    /// channel tables.
+    ///
+    /// Not the same missing input the Solana row has: an EVM row declares
+    /// its own EIP-712 domain, so the config is *complete* and the node
+    /// happily verified inbound peer claims on it. What is missing is the
+    /// node's EVM identity. `[settlement.evm.key]` is the address a
+    /// channel names as this node's participant, and
+    /// `TokenNetwork.claimFromChannel` refuses any caller that is not one
+    /// -- so without the table there is no address this node could ever
+    /// redeem the claim as, from this process or any other. It also signs
+    /// no outbound covering claim (ADR 0024's peer claim identity is that
+    /// same key), so the peering could only ever take and never pay.
+    ///
+    /// Refused rather than left loading, for the reason #1134 gave:
+    /// `Config::load` already requires every peering to carry a row
+    /// ([`ConfigError::PeerChannelUnbound`]), so a row that binds nothing
+    /// leaves the peering bound on paper and unredeemable in fact.
+    #[error(
+        "peer '{peer_id}' names an EVM '[[peer_channels]]' row but this node has no \
+         '[settlement.evm]' table: that table is where this node's EVM address comes from, and \
+         a channel's claims are redeemed by its on-chain participant \
+         ('TokenNetwork.claimFromChannel' reverts 'InvalidParticipant' for anyone else). With \
+         no table there is no address to be that participant, so this node would verify the \
+         peer's inbound claims, render carriage for them and never be able to collect -- and it \
+         would sign no covering claim outbound either, since ADR 0024's peer claim is signed by \
+         that same settlement key. Add '[settlement.evm]', or delete the row and peer over a \
+         chain this node settles on"
+    )]
+    PeerChannelWithoutEvmSettlement { peer_id: String },
+
     #[error(
         "invalid [[peer_channels]] {field} '{value}': must be base58 encoding a 32-byte \
          Solana account"
     )]
     PeerChannelInvalidSolanaAccount { field: &'static str, value: String },
 
+    /// The removed-key rejection for `[[peer_channels]] program_id` (issue
+    /// #1128), in the shape [`ConfigError::PeerCeilingRemoved`] and
+    /// [`ConfigError::PeerSaleRemoved`] already take: the key is still
+    /// parsed, purely so it can be refused **by name** rather than silently
+    /// ignored or lost in `#[serde(untagged)]`'s "matched no variant".
+    ///
+    /// It was a second declaration of a fact `[settlement.solana]` already
+    /// states, and since ADR 0053 bound the settlement program into a
+    /// Solana claim's signed message the two disagreeing is not a typo with
+    /// a cosmetic symptom: the node verifies inbound peer claims under the
+    /// row's program while its settlement backend redeems under
+    /// `[settlement.solana]`'s, so it renders carriage for claims it can
+    /// never cash. Removing the key is what makes that state unwritable --
+    /// the same "no second declaration" rule #981/#1082 applied to
+    /// `[[client_channels]]`.
     #[error(
-        "peer '{peer_id}' names a Solana '[[peer_channels]]' row with no 'program_id': a \
-         rendered outbound Solana claim's 'programId' is a required wire field \
-         (client-edge-spec.md §1.3), not an optional domain the way an EVM claim's 'chainId' \
-         is, so there is no configuration this connector could fall back to render without one \
-         (issue #759). Set 'program_id' to the base58 address of the deployed payment-channel \
-         program this channel was opened under"
+        "peer '{peer_id}' sets 'program_id' on a Solana '[[peer_channels]]' row, which was \
+         removed (issue #1128): a peer channel's settlement program is read from \
+         '[settlement.solana] program_id', the one program this node can actually redeem a \
+         claim under. Since ADR 0053 that program id is bound into a Solana claim's signed \
+         message, so a row naming a different one made this node accept peer claims it could \
+         never settle. Delete the key rather than replace it -- the value it should have held \
+         is already in '[settlement.solana]'"
     )]
-    PeerChannelMissingSolanaProgramId { peer_id: String },
+    PeerChannelProgramIdRemoved { peer_id: String },
+
+    /// A Solana `[[peer_channels]]` row on a node with no
+    /// `[settlement.solana]` table (issue #1128). The sibling of
+    /// [`ConfigError::PayChannelWithoutEvmSettlement`], and refused for the
+    /// same reason: with the per-row `program_id` gone there is no other
+    /// place a program id could come from, and a node that cannot settle on
+    /// Solana at all cannot redeem a Solana peer claim however correctly it
+    /// was signed.
+    ///
+    /// Refused rather than skipped-with-a-warning (which is what the client
+    /// edge does for the same shape today): `Config::load` already requires
+    /// every peering to carry a `[[peer_channels]]` row
+    /// ([`ConfigError::PeerChannelUnbound`]), so skipping this one would
+    /// leave the peering bound on paper and unverifiable in fact.
+    #[error(
+        "peer '{peer_id}' names a Solana '[[peer_channels]]' row but this node has no \
+         '[settlement.solana]' table: a peer claim on that channel is signed against the \
+         settlement program's id (ADR 0053) and redeemed through that same program, and \
+         without the table there is neither. Add '[settlement.solana]', or delete the row and \
+         peer over a chain this node settles on"
+    )]
+    PeerChannelWithoutSolanaSettlement { peer_id: String },
+
+    /// `[settlement.solana] program_id` is checked only for non-emptiness
+    /// where it is resolved; a Solana `[[peer_channels]]` row now takes its
+    /// program id from there, so the value has to be a real 32-byte address
+    /// before any claim can be judged against it (issue #1128). Named
+    /// against the row that needs it *and* the table that holds it, because
+    /// the fix is in the table and the symptom is on the row.
+    #[error(
+        "peer '{peer_id}' names a Solana '[[peer_channels]]' row, whose settlement program is \
+         read from '[settlement.solana] program_id' -- but that is '{value}', which is not \
+         base58 encoding a 32-byte Solana program address. Since ADR 0053 a claim on this \
+         channel signs that program id, so it must name a real deployed program"
+    )]
+    PeerChannelSolanaSettlementProgramIdInvalid { peer_id: String, value: String },
 
     #[error(
         "[[peer_channels]] is configured but 'state_dir' is not: this node would accept peer \
@@ -343,19 +648,22 @@ pub enum ConfigError {
     PeerChannelsWithoutStateDir,
 
     #[error(
-        "peer '{id}' sets 'addr', which was removed with the raw-TCP peer wire (ADR 0027, \
+        "peer '{id}' sets 'addr', which was removed with the raw-TCP transport (ADR 0027, \
          issue #679) -- a peer is reached by 'endpoint' (a wss:// or https:// URL) instead; \
          see docs/operators/btp-peer-transport-bringup.md"
     )]
     PeerAddrRemoved { id: String },
 
-    /// §11's removed-field row, `ceiling` half (ADR 0033, issue #882): every
-    /// peer PREPARE now carries its own covering claim (ADR 0031), so there
-    /// is no trailing exposure left for a ceiling to bound.
+    /// §11's removed-field row, `ceiling` half (ADR 0033, issue #882):
+    /// nothing tracks trailing exposure any more, so there is nothing for a
+    /// ceiling to bound. Cites the record that removed the machinery, not the
+    /// reasoning behind it (issue #1068) -- ADR 0042's covering-claim rule is
+    /// a target record whose forwarded half is unbuilt, and a boot error must
+    /// not depend on it.
     #[error(
-        "peer '{id}' sets 'ceiling', which was removed once every peer PREPARE carries its own \
-         covering claim (ADR 0031, ADR 0033, issue #882) -- there is no trailing exposure left \
-         for a ceiling to bound, so delete the key rather than replace it; see \
+        "peer '{id}' sets 'ceiling', which was removed when the exposure machinery was retired \
+         (ADR 0033, issue #882) -- nothing tracks trailing exposure, so there is nothing for a \
+         ceiling to bound. Delete the key rather than replace it; see \
          docs/operators/btp-peer-transport-bringup.md"
     )]
     PeerCeilingRemoved { id: String },
@@ -365,24 +673,44 @@ pub enum ConfigError {
     /// nothing left to flush.
     #[error(
         "peer '{id}' sets 'flush_interval_ms', which was removed for the same reason 'ceiling' \
-         was (ADR 0031, ADR 0033, issue #882): a claim no longer trails the fulfilment it \
-         covers, so there is no pending claim left to flush on a timer. Delete the key rather \
-         than replace it; see docs/operators/btp-peer-transport-bringup.md"
+         was (ADR 0033, issue #882): nothing tracks trailing exposure, so there is no pending \
+         claim for a timer to flush. Delete the key rather than replace it; see \
+         docs/operators/btp-peer-transport-bringup.md"
     )]
     PeerFlushIntervalRemoved { id: String },
 
+    /// §11's removed-field row, `claim_enforcement` (ADR 0042 item 4, issue
+    /// #1077): the issue #883 migration ramp is gone, so `"observe"` names
+    /// no mode and `"enforce"` names the only behaviour there is. Refused by
+    /// name rather than ignored, because a config still writing `"observe"`
+    /// was written by an operator who believes uncovered arrivals to a
+    /// priced termination are admitted here, and none are.
+    ///
+    /// Not to be confused with `forwarded_claim_enforcement`, which is a
+    /// live field and defaults the other way
+    /// ([`ConfigError::InvalidForwardedClaimEnforcement`]).
+    #[error(
+        "peer '{id}' sets 'claim_enforcement', which was removed with the issue #883 migration \
+         ramp (ADR 0042 item 4, issue #1077): an uncovered peer PREPARE to a priced termination \
+         is now always refused, so 'observe' names a mode this build does not have and \
+         'enforce' names the only behaviour there is. Delete the key rather than replace it -- \
+         and note that 'forwarded_claim_enforcement', which governs forwarded arrivals, is a \
+         different and still-live field; see docs/operators/claim-policy-rollout.md"
+    )]
+    PeerClaimEnforcementRemoved { id: String },
+
     /// The other half of §11's removed-field row, spelled and worded
-    /// exactly as PR #718 (`feat/delete-peer-wire`) spells it.
+    /// exactly as PR #718 (`feat/delete-peer-role`) spells it.
     ///
     /// **Defined here, constructed there.** #718 owns the deletion of the
-    /// raw-TCP peer wire itself (issue #679), including the top-level
+    /// raw-TCP transport itself (issue #679), including the top-level
     /// `peer_wire_addr` field, the listener `connector-cli` binds from it
     /// and the infra configs that still name it. This branch does not
     /// touch that listener, so on this branch alone the field still binds
     /// one; when the two land, #718's `if raw.peer_wire_addr.is_some()`
     /// meets this variant and the pair is complete.
     #[error(
-        "'peer_wire_addr' was removed with the raw-TCP peer wire (ADR 0027, issue #679) -- \
+        "'peer_wire_addr' was removed with the raw-TCP transport (ADR 0027, issue #679) -- \
          peer carriages are exposed on the connector's own listeners, not a separate socket; \
          see docs/operators/btp-peer-transport-bringup.md"
     )]
@@ -476,6 +804,92 @@ pub enum ConfigError {
     )]
     ClientChannelInvalidSolanaAccount { field: &'static str, value: String },
 
+    /// An EVM `[[client_channels]]` row on a node with no
+    /// `[settlement.evm]` table (issue #1138). The client-edge case of the
+    /// one rule `crate::settlement::SettlementTables` states, and the one
+    /// the issue called the hard half -- so, explicitly: **the declared
+    /// channel path's latitude does not reach this.**
+    ///
+    /// `connector_client_edge::DepositFloor::Unknown` exempts a declared
+    /// channel from the collateral cap (issue #646) because how much
+    /// unverified exposure to take on a channel is a *policy*, and an
+    /// operator hand-declaring a channel is making it. That latitude is
+    /// over how much may be spent on a channel this node is a participant
+    /// of. It is not latitude over whether such a channel exists at all: a
+    /// claim is redeemed by the channel's on-chain participant and this
+    /// node's EVM participant address IS `[settlement.evm.key]`
+    /// (ADR 0030's "no second key ... and none is invented", the same
+    /// sentence [`ConfigError::PayChannelWithoutEvmSettlement`] makes).
+    /// With no table there is no such address, so the row names a channel
+    /// this node is not in and every write it buys is given away. That is
+    /// a fact about the chain with exactly one answer -- the category
+    /// issue #1136 put the EIP-712 domain in -- not a policy.
+    ///
+    /// The wire already agreed before this refusal existed: a
+    /// settlement-less node's x402 greeting carries no `settlement` or
+    /// `settlements` key at all, so no conforming client can even discover
+    /// the domain to sign under, and this connector's own announce path
+    /// refuses to pay such a node by name ("a node with no settlement
+    /// backend cannot be paid by channel claim",
+    /// `connector_cli::announce`'s `NoSettlementTerms`).
+    #[error(
+        "'[[client_channels]]' names EVM channel '{channel_id}' but this node has no \
+         '[settlement.evm]' table: a client claim is an EIP-712 balance proof redeemed by the \
+         channel's on-chain participant, which IS this node's settlement address -- there is no \
+         second key to configure and none is invented (ADR 0030). With no table there is no \
+         address to be that participant, so this node would accept the claim, serve the paid \
+         write and never be able to collect. Declaring a channel is an operator's own credit \
+         decision (issue #646) and stays one; being able to redeem it at all is not a policy \
+         but a fact about the chain (issue #1136). Add '[settlement.evm]', or delete the row"
+    )]
+    ClientChannelWithoutEvmSettlement { channel_id: String },
+
+    /// A Solana `[[client_channels]]` row on a node with no
+    /// `[settlement.solana]` table (issue #1138), the twin of
+    /// [`ConfigError::ClientChannelWithoutEvmSettlement`] and of
+    /// [`ConfigError::PeerChannelWithoutSolanaSettlement`].
+    ///
+    /// Over-determined here, as it is on the peer table: besides having no
+    /// Solana identity to be the channel's participant, the node has no
+    /// program id to read, and since ADR 0053 that program id is part of
+    /// what every Solana claim signs -- so the row could not even be given
+    /// a verification domain.
+    ///
+    /// This replaces `connector-cli`'s warn-and-skip, which its own
+    /// comment already called the worse answer: a skipped row is a
+    /// configured channel that silently refuses every claim as unknown.
+    #[error(
+        "'[[client_channels]]' names Solana channel '{channel_account}' but this node has no \
+         '[settlement.solana]' table: a claim on that channel signs the settlement program's id \
+         (ADR 0053), which is read from that table, and is redeemed by the channel's on-chain \
+         participant, which is that table's key. Without it there is neither a program to judge \
+         the claim under nor an address to collect it at. Previously this row was skipped with \
+         a warning and every claim on it refused as an unknown channel; it is refused by name \
+         at load instead (issue #1138). Add '[settlement.solana]', or delete the row"
+    )]
+    ClientChannelWithoutSolanaSettlement { channel_account: String },
+
+    /// `[settlement.solana] program_id` is checked only for non-emptiness
+    /// where it is resolved, and a Solana `[[client_channels]]` row now
+    /// carries it (issue #1138) exactly as the peer table has since #1128
+    /// -- so the value has to be a real 32-byte address before any claim
+    /// can be judged against it. The client-edge twin of
+    /// [`ConfigError::PeerChannelSolanaSettlementProgramIdInvalid`], and
+    /// it closes a real crash: `ClientChannelRegistry::record_solana`
+    /// base58-decodes the program id and `connector-cli` `expect`s that
+    /// decode, so a malformed one used to panic the boot with a message
+    /// blaming the row's own fields.
+    #[error(
+        "'[[client_channels]]' names Solana channel '{channel_account}', whose settlement \
+         program is read from '[settlement.solana] program_id' -- but that is '{value}', which \
+         is not base58 encoding a 32-byte Solana program address. Since ADR 0053 a claim on \
+         this channel signs that program id, so it must name a real deployed program"
+    )]
+    ClientChannelSolanaSettlementProgramIdInvalid {
+        channel_account: String,
+        value: String,
+    },
+
     #[error("[[client_identities]] entry has an empty 'id'")]
     ClientIdentityIdEmpty,
 
@@ -490,6 +904,24 @@ pub enum ConfigError {
          mount it so it outlives the container"
     )]
     ClientChannelsWithoutStateDir,
+
+    /// A settlement table is what registers the `ClientChannelSource` that
+    /// resolves an undeclared channel from chain (ADR 0052, CF-27), so a
+    /// node configuring one accepts claims from strangers whether or not it
+    /// declares a single `[[client_channels]]` row -- and therefore has
+    /// watermarks to lose. Issue #1186: this arm did not exist, so the
+    /// permissionless shape, which is the one an operator should be running,
+    /// was the one shape that could boot with its watermarks in memory.
+    #[error(
+        "a settlement backend is configured but 'state_dir' is not: this node resolves an \
+         undeclared channel from chain and accepts the claim (ADR 0052), so it takes payment \
+         from senders it has never been configured for -- and would keep their replay \
+         watermarks only in memory. Every claim any of them has already spent becomes \
+         spendable again the next time this process restarts, and nothing in a log shows \
+         that it did (issue #605, issue #1186). Set a top-level state_dir to a directory \
+         this node can write, and mount it so it outlives the container"
+    )]
+    SettlementWithoutStateDir,
 
     #[error("state_dir '{path}' exists but is not a directory")]
     StateDirNotADirectory { path: PathBuf },
@@ -585,31 +1017,40 @@ pub enum ConfigError {
     )]
     UnresolvableLookupWindowTooLong { window_secs: u64, max_secs: u64 },
 
-    // -- The `[announce]` section (issue #784) --
+    // -- The `[node]` section (ADR 0050, issue #1080) --
     //
-    // Every one of these refuses a value that would otherwise be
-    // BROADCAST to the whole network in a kind:10032 event. That is what
-    // makes them load errors rather than warnings: an announce is read by
-    // strangers, cached, and acted on, and the node that published it has
-    // no way to take it back before its NIP-40 expiry.
+    // Every one of these refuses a value this node would otherwise publish
+    // in its own self-description, which is read by strangers and acted on.
+    // That is what makes them load errors rather than warnings.
     #[error(
-        "[announce] names no addresses: an announce with no `addresses` describes no node at \
-         all. Set `addresses = [\"g.your.node\"]` (primary first) -- see \
-         docs/operators/announcing-a-node.md (issue #784)"
+        "[node] names no addresses: a section with no `addresses` describes no node at all. \
+         Set `addresses = [\"g.your.node\"]` (primary first) -- see \
+         docs/protocol/self-description-spec.md (ADR 0050, issue #1080)"
     )]
-    AnnounceNoAddresses,
+    NodeNoAddresses,
 
+    /// Issue #1220: `btp_endpoint` is required when `peer_expose` opens a BTP
+    /// peer listener; `http_endpoint` whenever it opens any -- a peer covering
+    /// a forward asks this node's client edge for claim-state over HTTP
+    /// whichever carriage the packet rides (issue #1217), so a peerable node
+    /// with no HTTP endpoint is one nobody can pay.
     #[error(
-        "[announce] {field} is not set: a node behind TLS termination cannot learn its own \
-         public name, so this is an operator fact and there is deliberately no default. The \
-         retired sidecar DID default it, and its compiled-in fallback still names a `/rust/ilp` \
-         path that answers 410 Gone on both devnet boxes -- a default here is how a node ends up \
-         broadcasting a dead URL to the network (issue #784)"
+        "[node] {field} is not set, but peer_expose = \"{peer_expose}\" makes this node \
+         peerable and a peer needs it (btp_endpoint to dial over BTP; http_endpoint to ask \
+         this node's client edge for claim-state over HTTP, whichever carriage a packet \
+         rides): a node behind TLS termination cannot learn its own public name, so this is \
+         an operator fact and there is deliberately no default. The retired announcer sidecar \
+         DID default it, and its compiled-in fallback still names a `/rust/ilp` path that \
+         answers 410 Gone on both devnet boxes -- a default here is how a node ends up \
+         publishing a dead URL to whoever asks (ADR 0050, issue #1220)"
     )]
-    AnnounceMissingEndpoint { field: &'static str },
+    NodeMissingEndpoint {
+        field: &'static str,
+        peer_expose: &'static str,
+    },
 
-    #[error("[announce] {field} '{value}' is not a URL: {source}")]
-    AnnounceInvalidUrl {
+    #[error("[node] {field} '{value}' is not a URL: {source}")]
+    NodeInvalidUrl {
         field: &'static str,
         value: String,
         #[source]
@@ -617,67 +1058,77 @@ pub enum ConfigError {
     },
 
     #[error(
-        "[announce] {field} '{value}' has scheme '{scheme}', but this field must name one of: \
-         {allowed}. The three URLs an announce carries are different things and conflating any \
-         two is the bug: `http_endpoint`/`btp_endpoint` are where clients PAY this node, and \
-         `relay_url` is where they READ it for FREE over a Nostr WebSocket. An `http(s)://` \
-         `relay_url` in particular is the relay's PRIVATE write ingress -- announcing it \
-         publishes an unauthenticated write door to every client on the network (issue #784)"
+        "[node] {field} '{value}' has scheme '{scheme}', but this field must name one of: \
+         {allowed}. The two URLs a node publishes are where clients PAY it, over two different \
+         carriages: `http_endpoint` is ILP-over-HTTP (`https://`) and `btp_endpoint` is BTP \
+         (`wss://`). Conflating them publishes an address no client can reach (ADR 0050)"
     )]
-    AnnounceEndpointScheme {
+    NodeEndpointScheme {
         field: &'static str,
         value: String,
         scheme: String,
         allowed: String,
     },
 
+    /// A `[node]` (or a stale `[announce]`) key that died with the kind:10032
+    /// announce (ADR 0046, issue #1074).
+    ///
+    /// The removed-key trap [`ConfigError::PeerWireAddrRemoved`] and
+    /// [`ConfigError::PeerSaleRemoved`] already take, for the same reason: the
+    /// devnet boxes bind-mount configs that lead the repo copies, so a stale
+    /// file must stop the node **by name** rather than load with the key
+    /// silently dropped (ADR 0009).
+    ///
+    /// One variant covers all fifteen, because the fix is always the same --
+    /// delete the line. Nothing survives for any of them to be rewritten into:
+    /// what a node publishes about itself is now either one of `[node]`'s three
+    /// configured facts or derived from a settlement backend that proved it
+    /// against a chain.
     #[error(
-        "[announce] ttl_secs is 0: a NIP-40 `expiration` tag of `created_at + 0` is already \
-         expired when it is signed, so every relay honouring the tag drops the announce while \
-         this file reads as configured. Omit the field for the default, or set how many seconds \
-         the announce should stay live (issue #784)"
+        "'[node] {field}' was removed with the kind:10032 announce (ADR 0046, issue #1074): a \
+         connector answers when asked and never announces, so there is no event for this key to \
+         ride on. `[node]` keeps exactly three fields -- `addresses`, `http_endpoint` and \
+         `btp_endpoint` -- the facts a node cannot introspect about itself; everything else it \
+         publishes is derived from the settlement backends and the route table (ADR 0050). \
+         Delete the line. `relay_url` in particular described software BEHIND this connector, \
+         which a self-description never carries, and `solana_chain_id` was a second declaration \
+         of a fact `[settlement.solana]` already holds -- which is how a mainnet node came to \
+         describe itself as devnet (issue #981)"
     )]
-    AnnounceZeroTtl,
+    AnnounceKeyRemoved { field: &'static str },
 
+    /// The section itself, renamed rather than removed (ADR 0050).
+    ///
+    /// Two of `[announce]`'s fields feed the packet path -- they ride the x402
+    /// greeting so a client with a stale genesis seed can bootstrap -- so this
+    /// is a rename, not a deletion, and the error says so: an operator whose
+    /// file still writes the old heading needs the new one, not a eulogy.
     #[error(
-        "[announce] pay_channel '{value}' is not a 32-byte on-chain channel id: it must be 64 \
-         hex characters, optionally `0x`-prefixed. This is the channel this node PAYS an \
-         announce from as an ordinary client of the relay's connector -- not a \
-         [[client_channels]] row, which is a channel this node RECEIVES on (issue #784)"
+        "'[announce]' was renamed to '[node]' (ADR 0050, issue #1080): the section holds the \
+         facts a node cannot introspect about itself, and it is named for what they are rather \
+         than for a verb this connector no longer has (ADR 0046 removed the announce). Rename \
+         the heading and keep `addresses`, `http_endpoint` and `btp_endpoint`; every other key \
+         it used to carry is gone"
     )]
-    AnnounceInvalidPayChannel { value: String },
+    AnnounceSectionRenamed,
 
-    #[error("[announce] identity_key_file does not exist or is not a file: {0}")]
-    AnnounceIdentityKeyFileNotFound(PathBuf),
-
+    /// The removed-section trap for purchasable peering (ADR 0043), the
+    /// same shape [`ConfigError::PeerWireAddrRemoved`] and
+    /// [`ConfigError::PeerCeilingRemoved`] already take: the section is
+    /// still parsed so a stale config naming it stops the node by name
+    /// rather than being silently dropped by `deny_unknown_fields`.
+    ///
+    /// One variant covers the whole table -- `prefix`, `price`,
+    /// `lease_seconds` and every abuse bound -- because there is no
+    /// surviving `[peer_sale]` for any of them to be written into: the
+    /// fix is always to delete the section, never to correct a field.
     #[error(
-        "[announce] notice_id, notice_summary and notice_url must all be set together (or none \
-         at all) to configure an operator notice; notice_severity is optional and defaults to \
-         \"info\" (issue #912)"
+        "'[peer_sale]' was removed with purchasable peering (ADR 0043) -- a peering cannot be \
+         bought at all, so 'prefix', 'price', 'lease_seconds', 'max_purchased_rows', \
+         'max_routes_per_payer', 'max_prefix_length', 'purchase_rate_limit' and \
+         'purchase_rate_window_seconds' have nothing left to configure. Delete the whole \
+         section; an operator still adds a peer and its route directly, over the operator \
+         surface (POST /peers, POST /routes/peers) or in the config file"
     )]
-    AnnounceNoticeIncomplete,
-
-    #[error(
-        "[announce] notice_severity must be \"info\" or \"action-required\", got \"{value}\" \
-         (issue #912)"
-    )]
-    AnnounceNoticeInvalidSeverity { value: String },
-
-    #[error(
-        "[peer_sale] prefix '{prefix}' sets no 'price': the peer-sale route is never silently \
-         free either (ADR 0028/issue #557) -- set 'price = 0' if that is deliberate (issue #885)"
-    )]
-    PeerSaleMissingPrice { prefix: String },
-
-    #[error(
-        "[peer_sale] prefix '{prefix}' collides with a route, peer route or child already \
-         naming that prefix (issue #885) -- prefixes share one namespace"
-    )]
-    PeerSalePrefixCollision { prefix: String },
-
-    #[error(
-        "[peer_sale] prefix '{prefix}' sets no 'lease_seconds': a purchased peering is a lease, \
-         never a permanent grant (issue #886) -- name how long a purchase buys"
-    )]
-    PeerSaleMissingLease { prefix: String },
+    PeerSaleRemoved,
 }

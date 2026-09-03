@@ -1,0 +1,265 @@
+# release-connector — one deliberate act, then everything after it.
+#
+# ── WHAT THIS IS ─────────────────────────────────────────────────────────
+# Cutting a connector release used to be several separate acts, each with its
+# own way of being forgotten: wait for the green-main build, find its
+# `rust-sha-` tag, decide what to call this state of the world, write it down
+# somewhere. Every one of those is mechanical.
+#
+# This workflow automates the mechanical parts. It is `workflow_dispatch`
+# ONLY. It has no `push:` trigger, no `schedule:`, and no `workflow_run:`
+# chaining off a green build, and adding one would be a reversal of ADR 0041
+# Decision 3 rather than a convenience:
+#
+#   "The connector image does not follow rule 1 by checking — it is not
+#    auto-deployed at all."
+#
+# `the_release_workflow_is_dispatch_only` in
+# crates/connector-bin/tests/fleet_release_gate.rs is the regression guard;
+# it fails the build if a trigger is ever added here.
+#
+# ── WHAT THIS IS NOT, AS OF ADR 0068 ────────────────────────────────────────
+# This workflow used to end by dispatching `promote-to-fleet.yml`, which
+# moved a `:rust-release` tag both the relay and store boxes' Watchtower
+# followed, gated on a hand-answered "does this build need a landed config
+# change first" ordering question. Both boxes now deploy from their OWN
+# repos' `deploy/` bundles (`toon-protocol/relay`, `toon-protocol/store`),
+# each pinning the connector by release handle in exactly one place in that
+# repo. There is nothing left in THIS repo for a promotion to move a tag
+# onto — ADR 0068 retires the mechanism rather than repairing it.
+#
+# This workflow's job ends at the GitHub Release. Bumping a node repo's pin
+# to a new handle is that repo's own reviewed change, not a step here.
+#
+# The record for this workflow is ADR 0055 (superseded in part by ADR 0068).
+# ADR 0041 remains the record for why the image was supervised at all.
+#
+# ── THE RELEASE HANDLE IS A DATE AND A COUNTER, NOT A VERSION ───────────────
+# A release is named `2026.08.21.1`: UTC date, then the 1-based ordinal of
+# that day's releases. Monotonic, sortable with `sort -V`, and it says exactly
+# what it knows — when this state of the world was cut, and in what order.
+#
+# It is deliberately NOT semver, for the reason deploy/connector-rust/README.md
+# already gives about the image tags: no crate under `crates/` has a release
+# process, every one of them is `0.1.0`, and a `1.4.0` here "would claim a
+# stability contract the binary hasn't earned". A MINOR/MAJOR series is a
+# promise about compatibility; this project has not made that promise, and a
+# version number that lies is worse than no version number — someone
+# eventually pins against it.
+#
+# (`package.json` still says `"version": "3.3.0"`. That is TypeScript-era
+# residue for the npm packages under `packages/`, it is not this binary's
+# version, and it is deliberately untouched.)
+#
+# ── THE SEQUENCE ────────────────────────────────────────────────────────────
+#   version   compute the next handle, and refuse to reuse one
+#   build     call publish-connector-rust-image.yml — ONE build definition,
+#             shared with green main, stamped with the handle
+#   release   create the GitHub Release, carrying the `rust-sha-` tag a node
+#             repo pins to adopt this build
+
+name: release-connector
+
+# DISPATCH ONLY. See the header. Do not add `push`, `schedule` or
+# `workflow_run` — fleet_release_gate.rs fails the build if you do.
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why this build is being released. Recorded in the release notes and the summary.'
+        type: string
+        required: true
+      notes:
+        description: 'Extra release notes, appended verbatim under the generated body.'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  # `gh release create` writes a tag and a release.
+  contents: write
+  packages: write
+
+concurrency:
+  # Never two releases at once: the handle is computed from the tags that
+  # exist, so two concurrent runs would race to `2026.08.21.1` and one would
+  # fail at `gh release create` after having already built an image.
+  group: release-connector
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/connector
+
+jobs:
+  # ── 1. The handle ─────────────────────────────────────────────────────────
+  version:
+    name: Cut the release handle
+    runs-on: ubuntu-latest
+    outputs:
+      handle: ${{ steps.handle.outputs.handle }}
+      sha: ${{ steps.handle.outputs.sha }}
+      short: ${{ steps.handle.outputs.short }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Tags are how the handle series is discovered, and the ancestry
+          # check below needs history rather than a shallow tip.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: The released commit must be on main
+        run: |
+          set -euo pipefail
+          # A release fronts the live fleet. Failing here costs no build: an
+          # off-main dispatch would otherwise burn ten minutes of runner and a
+          # handle before being refused at the last job.
+          if ! git merge-base --is-ancestor "${{ github.sha }}" origin/main; then
+            echo "::error::${{ github.sha }} is not an ancestor of origin/main."
+            echo "::error::Only a build of main may front the live fleet (ADR 0041). Re-dispatch on main."
+            exit 1
+          fi
+          echo "✓ ${{ github.sha }} is on main."
+
+      - name: Compute the next handle
+        id: handle
+        run: |
+          set -euo pipefail
+          # UTC, always. A runner is UTC and a local date would make the
+          # series non-monotonic for anyone west of Greenwich.
+          DATE=$(date -u +%Y.%m.%d)
+
+          # The existing git tags ARE the series. Not `gh release list`: a
+          # release can be deleted while its tag survives, and reusing a
+          # handle whose tag is still in the history would produce two
+          # different commits answering to one name.
+          N=0
+          for T in $(git tag -l "${DATE}.*"); do
+            ORD="${T##*.}"
+            case "$ORD" in
+              '' | *[!0-9]*) continue ;;
+            esac
+            # An `if`, not `[ … ] && N=…`: the latter leaves the whole loop
+            # with exit status 1 whenever the last tag examined is not the
+            # highest, which under `set -e` is a trap waiting for whoever
+            # appends a command after it.
+            if [ "$ORD" -gt "$N" ]; then N="$ORD"; fi
+          done
+          HANDLE="${DATE}.$((N + 1))"
+
+          if git rev-parse -q --verify "refs/tags/${HANDLE}" >/dev/null; then
+            echo "::error::tag ${HANDLE} already exists — refusing to reuse a handle."
+            exit 1
+          fi
+
+          SHORT=$(echo '${{ github.sha }}' | cut -c1-7)
+          {
+            echo "handle=$HANDLE"
+            echo "sha=${{ github.sha }}"
+            echo "short=$SHORT"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release handle: $HANDLE  (commit $SHORT)"
+
+  # ── 2. The build ──────────────────────────────────────────────────────────
+  # The SAME workflow a green merge runs. A release does not get its own
+  # `docker build`: two build definitions would mean two things to keep in
+  # step with the Dockerfile, the amd64-only decision and the ADR 0009
+  # refusal check, and only one of them would run on most days.
+  build:
+    name: Build the release image
+    needs: version
+    uses: ./.github/workflows/publish-connector-rust-image.yml
+    with:
+      release_handle: ${{ needs.version.outputs.handle }}
+    permissions:
+      contents: read
+      packages: write
+
+  # ── 3. The release ────────────────────────────────────────────────────────
+  release:
+    name: Publish release ${{ needs.version.outputs.handle }}
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Alias the image under its release handle
+        env:
+          HANDLE: ${{ needs.version.outputs.handle }}
+          BUILD_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          # A retag of the manifest just built, never a rebuild. This tag is
+          # immutable by convention: nothing ever moves a handle, which is
+          # what lets a GitHub Release and a digest mean each other.
+          docker buildx imagetools create \
+            -t "$IMAGE:rust-$HANDLE" "$IMAGE:$BUILD_TAG"
+          echo "Aliased $IMAGE:rust-$HANDLE -> $BUILD_TAG"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HANDLE: ${{ needs.version.outputs.handle }}
+          SHA: ${{ needs.version.outputs.sha }}
+          BUILD_TAG: ${{ needs.build.outputs.image_tag }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          REASON: ${{ inputs.reason }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+
+          BODY=$(cat <<BODY_EOF
+          promotion-tag: ${BUILD_TAG}
+          commit: ${SHA}
+          digest: ${DIGEST}
+
+          ---
+
+          **Reason:** ${REASON}
+
+          | | |
+          |---|---|
+          | Image | \`ghcr.io/${{ github.repository_owner }}/connector:${BUILD_TAG}\` |
+          | Handle alias | \`ghcr.io/${{ github.repository_owner }}/connector:rust-${HANDLE}\` |
+          | Commit | \`${SHA}\` |
+
+          A node repository (\`toon-protocol/relay\`, \`toon-protocol/store\`) adopts
+          this build by bumping its own pinned connector tag to \`${BUILD_TAG}\` in
+          its own reviewed change (ADR 0068) — nothing here deploys it.
+
+          ${NOTES}
+          BODY_EOF
+          )
+
+          printf '%s\n' "$BODY" > /tmp/release-body.md
+          gh release create "$HANDLE" \
+            --target "$SHA" \
+            --title "$HANDLE" \
+            --notes-file /tmp/release-body.md
+
+          echo "Created release $HANDLE"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## release-connector"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Handle | \`${{ needs.version.outputs.handle }}\` |"
+            echo "| Image | \`$IMAGE:${{ needs.build.outputs.image_tag }}\` |"
+            echo "| Handle alias | \`$IMAGE:rust-${{ needs.version.outputs.handle }}\` |"
+            echo "| Digest | \`${{ needs.build.outputs.digest }}\` |"
+            echo "| Reason | ${{ inputs.reason }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

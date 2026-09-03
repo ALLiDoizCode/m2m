@@ -1,7 +1,23 @@
 //! OER (Octet Encoding Rules) primitives per RFC-0030, ported byte-for-byte
-//! from the existing TypeScript implementation
-//! (`packages/shared/src/encoding/oer.ts`) so the Rust and TypeScript fleets
-//! agree on the wire.
+//! from the TypeScript prototype's `packages/shared/src/encoding/oer.ts` -- a
+//! **historical** citation: ADR 0017 retired that connector and the path no
+//! longer exists in this repository.
+//!
+//! `encode_var_uint` / `encode_var_octet_string` are RFC-0030's, **tightened**
+//! rather than diverged from: `decode_var_uint` refuses a non-canonical length
+//! determinant (ADR 0023) where RFC-0027 permits an implementation to accept
+//! one. `encode_generalized_time` is the exception -- it is a fixed 19-byte
+//! `YYYYMMDDHHMMSS.fffZ` with no length prefix, which is neither RFC-0030's
+//! variable-length GeneralizedTime (that one omits a zero millisecond part)
+//! nor RFC-0027's fixed 17-byte Interledger Timestamp.
+//!
+//! What is built on top of these is therefore **not** RFC-0027's packet, and
+//! that is a ratified decision rather than a bug (ADR 0063). Two of its three
+//! divergences originate here: the 19-byte time above, and `packet.rs`
+//! encoding a PREPARE's `amount` with `encode_var_uint` rather than as a fixed
+//! `UInt64`. The third -- no outer type-length wrapper -- is `packet.rs`'s
+//! alone. Its module doc has the full table and names the vector that pins the
+//! bytes.
 
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
 

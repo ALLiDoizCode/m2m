@@ -1,6 +1,11 @@
 # Wire vectors: the invariants behind them
 
-**Status:** Non-normative. Per [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md), the
+**Status:** **Live — the vector companion, role unchanged** (wayfinder map #1049, issue #1065).
+Its Scope section is stale on three counts and is corrected as part of the vector-coverage work
+(issue #1073): the committed set now also carries a `peer_carriage` section (20 dual-encoded entries,
+several of them behavioural) and a `channel_control_declaration` section that nothing describes, and it
+carries **no client-edge carriage section at all** despite this document's Scope claiming the client edge
+as its subject. _Originally:_ Non-normative. Per [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md), the
 committed vector set (`vectors/wire-vectors.json`) is the cross-repo contract; this document only
 names the invariants it is evidence of, written down before any vector was generated, per its own
 acceptance criterion. A disagreement between this text and the vectors is a bug in this text.
@@ -13,12 +18,23 @@ This covers the **client edge** termination wire (issue #498): the structured en
 (`connector_domain::envelope`), the gift wrap sealing it (`connector_signer::giftwrap`), the
 fulfilment a terminating connector derives from it (ADR 0019), and the EIP-712 `BalanceProof`
 claim-signing scheme (`connector_signer::claim_signature`, ADR 0024). The claim scheme is included
-even though it is also what the **peer wire**'s claim exchange uses (`docs/protocol/
-peer-wire-spec.md` §3.5) — `connector_signer::claim_signature` is one implementation shared by
+even though it is also what the **peer semantics**'s claim exchange uses (`docs/protocol/
+peer-semantics-pre-868.md` §3.5) — `connector_signer::claim_signature` is one implementation shared by
 both wires, not two, and a client-edge claim (`client-edge-spec.md` §1.3 step 4) is checked against
-exactly the same digest. Nothing else about the peer wire is in scope here: it is
+exactly the same digest. Nothing else about the peer semantics is in scope here: it is
 operator-to-operator on both ends (ADR 0003), already normative prose for a different reason, and
 the rest of it is out of this issue's scope.
+
+**The ILP packet's own encoding is in scope of the committed set, and was not in scope of this
+document.** That is worth saying because it has been misread three times: the `peer_carriage`
+fixtures added later carry complete OER `PREPARE`, `FULFILL` and `REJECT` packets
+(`prepare.http_body_hex`, `fulfill_ack_accepted.packet_hex`, `reject_with_cost.packet_hex`), so
+[ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) has bound the packet bytes since
+those landed, even though no section is named for them and no invariant below is written about
+them. The encoding is **not** RFC 0027's — RFC 0027's semantics in TOON's own encoding
+([ADR 0063](../adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)) — and
+[`vectors/README.md`](../../vectors/README.md#the-ilp-packet-encoding) is where a replaying SDK
+finds the three divergences, the grammar and a byte-by-byte walk of the pinned PREPARE.
 
 ## Invariants
 
@@ -84,7 +100,7 @@ of band.
 fields, and `verify_evm_balance_proof` accepts a signature over that digest only from the address
 that actually produced it — changing any one field (`channel_id`, `nonce`, `transferred_amount`,
 `chain_id`, or `token_network_address`) invalidates a prior signature rather than being silently
-tolerated. This is the scheme both the peer wire (`ClaimBook::accept_inbound`) and the client edge
+tolerated. This is the scheme both the peer semantics (`ClaimBook::accept_inbound`) and the client edge
 (`client-edge-spec.md` §1.3 step 4) check a claim's signature against, replacing a SHA-256 tuple
 (`connector_domain::claim_digest`, removed by #575/#583) that no chain ever verified.
 

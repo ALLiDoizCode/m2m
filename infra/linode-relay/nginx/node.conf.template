@@ -56,6 +56,62 @@ server {
 
     resolver 127.0.0.11 valid=10s ipv6=off;
 
+    # ── Every upstream below names its container through a VARIABLE ─────────
+    # (issue #993, and the correct form for issue #987)
+    #
+    # nginx resolves a LITERAL upstream hostname exactly once, at
+    # config-PARSE time, and caches that address for the life of the worker.
+    # Docker hands a recreated container a NEW address on the compose
+    # network, so the moment anything recreates an upstream -- the
+    # label-scoped Watchtower of toon-meta#403 recreating it on a new
+    # `:release` digest, or a plain `docker compose up -d` -- this edge
+    # answers `502 connect() failed (111: Connection refused)` until someone
+    # runs `nginx -s reload`. That is an unsupervised outage on a box whose
+    # whole point is that a green merge reaches it with no operator in the
+    # loop, and it is what took the store edge down on 2026-08-16.
+    #
+    # Naming the upstream through a variable moves resolution to REQUEST
+    # time, where the `resolver` directive above (Docker's embedded DNS, 10s
+    # TTL) applies -- so a recreate self-heals within the TTL, no reload.
+    # Proven live on both boxes by forcing an upstream onto a new address:
+    # relay `swap-node` .7 -> .8, `/swap/ilp/btp` back to `101` in 3s; store
+    # `connector-rust` .4 -> .8, `/ilp/identity` back to `200` in 3s. Neither
+    # needed a reload.
+    #
+    # THE URI RULE (issue #987 as filed; CORRECTED by issue #1023). A variable
+    # upstream does not do the literal form's prefix substitution -- but nginx
+    # does NOT ignore a URI part on one either. It honours it: nginx's own
+    # proxy_pass docs say "if URI is specified in the directive, it is passed
+    # to the server as is, replacing the original request URI", and #1023
+    # measured exactly that on nginx 1.18 through 1.31. So
+    # `proxy_pass http://$u:3400/ilp/btp;` does send `/ilp/btp`. #987 read the
+    # maker's 404 as "the appended URI is ignored and the original
+    # `$request_uri` is forwarded"; that is not what nginx does, and the 404
+    # had another cause -- a rendered `conf.d` that had drifted from its
+    # template would produce it, and #999 records these files drifting apart.
+    #
+    # What IS true, and why the form below is still the right default: a URI
+    # part on a variable upstream is STATIC. It replaces the WHOLE request
+    # URI, so neither the path past the location nor the query string survives
+    # it -- silently, and reading the same in the file either way. The form
+    # both boxes run keeps both: `rewrite ^.*$ /<target> break;` to set `$uri`,
+    # then a proxy_pass with NO URI part at all -- a variable proxy_pass
+    # without a URI forwards the (possibly rewritten) `$uri` AND the args.
+    # Never append `$uri`/`$request_uri` to the proxy_pass itself; that
+    # double-applies against the rewrite, and `$uri` drops the args on its own.
+    # Where the upstream path already equals the request path
+    # (`/ilp/identity`) no rewrite is needed.
+    #
+    # Test any change here over HTTP/1.1 (`curl --http1.1`): HTTP/2 strips
+    # the `Upgrade` header and masks a broken WebSocket upstream.
+    #
+    # A second, older reason for the same form (issue #985 finding 2): an
+    # unresolvable literal upstream is a hard `[emerg] host not found in
+    # upstream` that exits the whole nginx master process, taking every
+    # server block in this file down -- not just the location that names a
+    # service nobody has brought up yet. A variable defers that to a 502 on
+    # the one path.
+
     # The whole /admin prefix is refused here rather than proxied — mirrors
     # both other boxes (infra/linode-store/nginx/conf.d/node.conf,
     # infra/linode-node/nginx/conf.d/node.conf). 404 rather than 401/403 so
@@ -82,11 +138,79 @@ server {
         add_header Access-Control-Allow-Origin "https://proxy.${DOMAIN}" always;
         add_header Vary "Origin" always;
         limit_req zone=relay burst=400 nodelay;
-        proxy_pass http://connector-rust:4000/ilp/identity;
+        set $upstream connector-rust;
+        proxy_pass http://$upstream:4000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # ── rolling-swap MAKER sidecar (issue #983, connector-infra half of
+    #    toon-meta#402) ────────────────────────────────────────────────────
+    # A path under THIS box's own domain/certificate, not a dedicated
+    # subdomain — the maker needs no DNS record or TLS cert of its own,
+    # unlike toon-meta#402's original enumeration of human steps (see
+    # docs/operators/swap-node-bringup.md). `swap-node` resolves by
+    # container-name DNS once docker-compose.relay.swap.yml's service joins
+    # this compose project's default network, same as `connector-rust`
+    # above. Exact-match `location =`, ahead of the generic `location /`
+    # below (nginx checks exact matches first regardless of file order, but
+    # grouping them together here mirrors `/ilp/identity`'s own placement).
+    #
+    # Direct-dial model (swap#105): a client reaches the maker by dialing
+    # `/swap/ilp/btp` from its OWN kind:10032 announce
+    # (docker-compose.relay.swap-announce.yml), never through this box's
+    # `connector-rust` routing table — there is no `[[routes]]` entry
+    # forwarding to it and there should not be.
+    #
+    # These two locations use the variable-upstream form the block by
+    # `resolver` above explains, and they were the first here to need it for
+    # its OWN older reason: this compose service does not run until a human
+    # brings it up (docker-compose.relay.swap.yml's header), and a literal
+    # upstream nobody has started yet is a hard `[emerg] host not found in
+    # upstream` that exits the nginx master and takes the connector edge and
+    # relay-ws down with it. As committed the form was still wrong -- the
+    # appended `/ilp/btp` was silently ignored and the maker 404'd on the
+    # unstripped `/swap/ilp/btp` (issue #987); the `rewrite ... break` below
+    # is what actually strips the prefix. Verified live at `101 Switching
+    # Protocols` over `--http1.1`.
+    location = /swap/ilp/btp {
+        set $upstream swap-node;
+        limit_req zone=relay burst=60 nodelay;
+        rewrite ^.*$ /ilp/btp break;
+        proxy_pass http://$upstream:3400;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+
+        client_max_body_size 4m;
+    }
+
+    # The maker's HTTP-over-ILP surface. The proven direct-dial swap flow
+    # only ever dials BTP above; this exists because `[announce]
+    # http_endpoint` is a REQUIRED, validated field (crates/connector-
+    # config/src/announce.rs) that
+    # `infra/linode-relay/connector-rust.swap-announce.toml` must name
+    # something reachable for — an embedded `ConnectorNode`
+    # serves both surfaces off one port, the same single-port shape this
+    # box's own `connector-rust:4000` already uses (`/ilp` and `/ilp/btp`
+    # side by side on the SAME upstream).
+    location = /swap/ilp {
+        set $upstream swap-node;
+        limit_req zone=relay burst=60 nodelay;
+        rewrite ^.*$ /ilp break;
+        proxy_pass http://$upstream:3400;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+
+        client_max_body_size 4m;
     }
 
     location / {

@@ -1,36 +1,40 @@
 ---
 name: rfc-0027-interledger-protocol-4
-description: Expert knowledge of Interledger RFC 0027 - Interledger Protocol V4 (ILPv4). Use when users ask about the core ILP protocol, packet format, routing logic, error codes, or fundamental protocol operations. Triggers on 'ILPv4', 'ILP packet', 'protocol format', 'routing', or core protocol questions.
+description: Expert knowledge of Interledger RFC 0027 - Interledger Protocol V4 (ILPv4). Use when users ask about the core ILP protocol, packet format, routing logic, error codes, or fundamental protocol operations. Answers from the copy vendored in this repository at docs/rfcs/, which carries a TOON profile saying where this connector departs. Triggers on 'ILPv4', 'ILP packet', 'protocol format', 'routing', or core protocol questions.
 ---
 
 # RFC 0027: Interledger Protocol V4 (ILPv4)
 
-## Overview
+**Read [`docs/rfcs/0027-interledger-protocol-4/0027-interledger-protocol-4.md`](../../../docs/rfcs/0027-interledger-protocol-4/0027-interledger-protocol-4.md).**
+It is the upstream RFC, unmodified, beneath a **TOON profile** written by this
+project. Answer from that file rather than from memory or from the network.
 
-Provides expert guidance on the core Interledger Protocol V4 including packet format, routing, and protocol operations.
+It gives you the packet itself: PREPARE, FULFILL, REJECT and the reject codes.
 
-## Core Capabilities
+## How to read it
 
-### 1. RFC Documentation Search
-Access RFC specification details using the MCP tool:
+1. **The TOON profile, at the top.** Every place this connector departs from the
+   RFC, each citing the ADR or `docs/protocol/` rule that governs it. A ⚠ marks
+   a departure that is easy to assume away — one a reader of the RFC would not
+   expect and would be wrong to guess at. Some are recorded and guarded, some are
+   open gaps; the bullet itself says which. Surface it plainly when it is
+   relevant, rather than reading the glyph as "unrecorded".
+2. **The body, below the `<!-- BEGIN VERBATIM UPSTREAM BODY -->` marker.** The
+   standard as written. It is never edited to match this connector
+   ([ADR 0062](../../../docs/adr/0062-an-rfc-is-vendored-verbatim-and-profiled-never-forked.md)),
+   and a test enforces that.
+
+## Precedence when they disagree
+
 ```
-mcp__interledger_org-v4_Docs__search_rfcs_documentation
+vectors  >  ADRs  >  docs/protocol/ specs  >  the TOON profile  >  the RFC body
 ```
 
-Search with queries like:
-- "ILPv4 interledger protocol v4"
-- "ILP packet format"
-- "protocol routing"
+The RFC body never overrides anything local — it is what the local rules are
+stated against. If the question is "what does this connector do", the ADR wins.
+If the question is "what does Interledger specify", the body wins. Distinguish
+the two in your answer; they are often not the same, and this file exists
+because that surprised somebody.
 
-### 2. Answer Questions
-Provide detailed explanations based on the RFC specification.
-
-### 3. Implementation Guidance
-Help users implement and integrate the protocol or feature.
-
-## Common Topics
-- ILP packet format and structure
-- Protocol message types
-- Payment routing and forwarding
-- Error handling and rejection codes
-- Core protocol specifications
+Never edit the body. A correction to how TOON aligns goes **above** the marker,
+or into the record that owns the rule.

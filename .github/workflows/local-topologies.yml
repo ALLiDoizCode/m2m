@@ -1,0 +1,134 @@
+name: Local Topologies
+
+# The shipped IMAGE, run against real containerised chains.
+#
+# This is not a second copy of the Rust gate. `cargo test` covers the
+# connector's behaviour far better than a container can -- it spawns its own
+# anvil and solana-test-validator per test (ADR 0007) and never touches
+# docker-compose. What it structurally cannot check is the thing every deploy
+# depends on: that the image, running as uid 10001, with a mounted
+# `connector.toml`, mounted key files and a real volume at `/app/state`, boots
+# and moves a packet.
+#
+# `devnet_configs_load.rs` boots the fleet's own committed `connector-rust.toml`
+# fixtures through the real binary -- the first half, checkable with no chain
+# since ADR 0009 refuses to start on an unreachable settlement RPC. A GitHub
+# runner has no chain to reach; here there is one, so "did not reach a serving
+# state" is an assertion rather than a boot-only check. (There is no longer a
+# candidate-image-vs-fleet-config gate before a fleet deploy: ADR 0068 retired
+# `promote-to-fleet.yml`, since neither devnet box deploys the connector from
+# this repository any more.)
+#
+# Path-filtered rather than run on every PR: a docs-only change cannot break
+# this, and the image build is the expensive part.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'packages/solana-program/**'
+      - 'packages/contracts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'deploy/connector-rust/Dockerfile'
+      - 'docker-compose.yml'
+      - 'infra/solana/**'
+      - 'local/**'
+      - '.github/workflows/local-topologies.yml'
+
+jobs:
+  topology:
+    # One job per topology, and `fail-fast: false` because they answer
+    # different questions: `solo` is about the image booting on a mounted
+    # config, `two-hop` about two of them peering and paying, `mixed-chain`
+    # about one node holding a settlement backend on each of two chains.
+    # Cancelling the others on the first red hides which of those broke.
+    #
+    # They cannot share a runner: every topology binds the same chain ports and
+    # the same compose project, and `make local-down` removes both.
+    name: ${{ matrix.topology }} topology
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        topology: [solo, two-hop, mixed-chain]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # packages/contracts' forge-std and openzeppelin-contracts. The
+          # compose anvil service self-heals with `forge install` if they are
+          # missing, but fetching them here is faster and keeps the failure
+          # mode "the submodule moved" rather than "the deploy timed out".
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # `cast` -- local/keys.sh funds the EVM settlement account with it.
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      # `solana`, `solana-keygen`, `spl-token` and `cargo-build-sbf` all ship
+      # in this one bundle. Same pinned release ci.yml's rust-gate installs --
+      # and NOT the v3.1.12 ci.yml's program jobs install, which is a separate
+      # deliberate pin. Both are recorded, with their reasons, in
+      # crates/connector-settlement-solana/tests/solana_cli_pins.rs; that guard
+      # fails the build if this literal drifts from what it records.
+      - name: Install Solana CLI tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      # A speed-up, and only that. `make local-up` builds the program through
+      # tools/solana/build-sbf.sh, which bootstraps $HOME/.cache/solana from
+      # cold; a miss here costs one platform-tools download.
+      #
+      # It was not always only that, and the difference is the whole point of
+      # the change that added this comment: this step's real job used to be
+      # creating that directory as a side effect of restoring it, because a
+      # pinned `cargo build-sbf` panics outright when it is absent. Cache
+      # entries are branch-scoped and a failed job saves nothing, so the day
+      # main's entry was evicted all three topologies went red on every open PR
+      # at once -- docs-only ones included -- and main had no way to write
+      # itself a new entry.
+      - name: Cache Solana platform-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/solana
+          key: solana-platform-tools-${{ runner.os }}-v1.52
+
+      - name: Cache Cargo registry and workspace target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Per topology, because three concurrent jobs writing one cache key
+          # race each other for it and the loser's upload is discarded with a
+          # warning. The restore key is shared, so a new topology still starts
+          # from whichever cache exists rather than from cold.
+          key: local-topologies-${{ runner.os }}-${{ matrix.topology }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            local-topologies-${{ runner.os }}-${{ matrix.topology }}-
+            local-topologies-${{ runner.os }}-
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # No `if: ...docker available...` guard, deliberately. ADR 0007's rule
+      # for a missing chain binary applies here for the same reason: a step
+      # that skips and reports success is worse than a missing check, because
+      # it claims one. If the tooling is absent this job fails.
+      - name: Bring the topology up, send a real packet, tear it down
+        run: make local-verify LOCAL_TOPOLOGY=${{ matrix.topology }}
+
+      # No log-capture step here on purpose: `make local-verify` must tear the
+      # stack down on the failure path too, so by the time a workflow step ran
+      # the containers would be gone. The target dumps the logs itself, before
+      # it tears anything down.

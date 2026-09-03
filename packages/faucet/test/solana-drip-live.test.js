@@ -6,12 +6,17 @@
 // has no docker daemon available, same as the Rust harness's non-CI fallback).
 //
 // Proves, against real transactions on a real chain:
-//   - drip() performs exactly one on-chain action, the USDC transfer (no
-//     `sol` field in the result at all — the SOL leg removed by #945 has no
+//   - drip() performs exactly one on-chain action, MINTING the USDC (no `sol`
+//     field in the result at all — the SOL leg removed by #945 has no
 //     successor);
+//   - the tokens are newly minted, not moved: the mint's total supply rises by
+//     exactly the drip amount and the faucet keeps no source token account at
+//     all, which is what makes the leg unable to run dry;
 //   - the recipient's own USDC token-account balance actually rose by the
 //     drip amount, not just that a signature was returned;
-//   - the recipient receives no SOL at all, before or after the drip.
+//   - the recipient receives no SOL at all, before or after the drip;
+//   - a mint this faucet is NOT the authority of is refused, before any
+//     account is created.
 //
 // Skips (does not fail) when solana-test-validator is not on PATH — this repo
 // has no equivalent, on the npm side, of the Rust gate's CI-only hard
@@ -31,13 +36,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Connection, Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import {
-  createMint,
-  getAccount,
-  getAssociatedTokenAddressSync,
-  getOrCreateAssociatedTokenAccount,
-  mintTo,
-} from '@solana/spl-token';
+import { createMint, getAccount, getAssociatedTokenAddressSync, getMint } from '@solana/spl-token';
 
 function solanaTestValidatorAvailable() {
   try {
@@ -77,6 +76,7 @@ test(
     // Assigned mid-test, referenced by the teardown below — declared up
     // here so a test that fails before the faucet exists still tears down.
     let faucet;
+    let mismatchFaucet;
     let connection;
     const rpcPort = 21000 + Math.floor(Math.random() * 3000);
     const rpcUrl = `http://127.0.0.1:${rpcPort}`;
@@ -113,6 +113,7 @@ test(
       // before the test's result was flushed, reporting assertion failures
       // as `ok` with exit code 0).
       faucet?.close();
+      mismatchFaucet?.close();
       try {
         connection?._rpcWebSocket.close();
       } catch {
@@ -148,19 +149,12 @@ test(
     const fundSig = await connection.requestAirdrop(treasury.publicKey, 10 * LAMPORTS_PER_SOL);
     await confirmAirdrop(connection, fundSig);
 
+    // The faucet keypair IS the mint authority — the shape both
+    // infra/solana/create-usdc-mint.sh (local) and
+    // infra/linode-faucet/create-devnet-usdc-mint.sh (devnet) produce. No
+    // starting supply is minted anywhere: drip() coins what it delivers, so a
+    // pre-funded source account would prove nothing.
     const mint = await createMint(connection, treasury, treasury.publicKey, null, DRIP_DECIMALS);
-
-    // drip()'s USDC transfer moves FROM the treasury's own ATA — mint it
-    // enough to cover every drip this test issues (mint authority is the
-    // treasury itself, mirroring infra/solana/create-usdc-mint.sh's real
-    // devnet setup).
-    const treasuryAta = await getOrCreateAssociatedTokenAccount(
-      connection,
-      treasury,
-      mint,
-      treasury.publicKey
-    );
-    await mintTo(connection, treasury, mint, treasuryAta.address, treasury, 1_000_000_000);
 
     const keypairPath = path.join(ledgerDir, 'treasury.json');
     fs.writeFileSync(keypairPath, JSON.stringify(Array.from(treasury.secretKey)));
@@ -185,9 +179,12 @@ test(
       'recipient must start with no SOL for this case to be meaningful'
     );
 
+    const supplyBefore = (await getMint(connection, mint)).supply;
+    assert.equal(supplyBefore, 0n, 'nothing is pre-minted: the drip must create what it delivers');
+
     const result = await faucet.drip(recipient.publicKey.toBase58());
 
-    // AC: exactly one on-chain action — the USDC transfer. No `sol` field of
+    // AC: exactly one on-chain action — the USDC mint. No `sol` field of
     // any shape (skipped/treasury/airdrop-fallback) survives in the result.
     assert.equal(result.sol, undefined);
     assert.ok(result.usdc.signature);
@@ -201,9 +198,65 @@ test(
     const recipientAccount = await getAccount(connection, recipientAta);
     assert.equal(recipientAccount.amount, DRIP_RAW_AMOUNT);
 
+    // MINTED, not transferred: total supply rose by exactly the drip. A
+    // transfer would have left supply unchanged, so this is the assertion that
+    // actually distinguishes the two mechanisms.
+    const supplyAfter = (await getMint(connection, mint)).supply;
+    assert.equal(supplyAfter, supplyBefore + BigInt(DRIP_RAW_AMOUNT));
+
+    // And the faucet holds no token account of its own — there is no treasury
+    // balance behind this leg to run dry, which is the whole point.
+    const faucetAta = getAssociatedTokenAddressSync(mint, treasury.publicKey);
+    await assert.rejects(
+      () => getAccount(connection, faucetAta),
+      'the faucet must hold no source token account: it mints, it does not spend a balance'
+    );
+
     // The faucet never sent the recipient any SOL, at all, in the course of
     // that drip — the treasury paid the fee and the ATA rent.
     const recipientBalanceAfter = await connection.getBalance(recipient.publicKey, 'confirmed');
     assert.equal(recipientBalanceAfter, 0, 'drip() must not fund the recipient with any SOL');
+
+    // ── A mint we are NOT the authority of is refused, before any account is
+    // created. This is the state the live devnet leg was actually in: the
+    // 2026-07-18 mint's authority key is lost, so `mintTo` could never
+    // succeed. Proving it here means the box says which two keys disagree
+    // instead of surfacing SPL's address-free "owner does not match".
+    const someoneElse = Keypair.generate();
+    const foreignMint = await createMint(
+      connection,
+      treasury, // we pay to create it...
+      someoneElse.publicKey, // ...but they hold the authority
+      null,
+      DRIP_DECIMALS
+    );
+
+    process.env.SOLANA_USDC_MINT = foreignMint.toBase58();
+    // A query string forces a SECOND module instance: solana.js reads its
+    // config into module-level consts at import time, so re-importing the same
+    // specifier would hand back the first faucet's already-bound env.
+    const { createSolanaFaucet: createAgain } = await import('../src/solana.js?foreign-mint');
+    mismatchFaucet = createAgain();
+    assert.ok(mismatchFaucet, 'the leg is still CONFIGURED — it is the authority that is wrong');
+
+    const strangerRecipient = Keypair.generate();
+    await assert.rejects(
+      () => mismatchFaucet.drip(strangerRecipient.publicKey.toBase58()),
+      (err) => {
+        assert.equal(err.code, 'MINT_AUTHORITY_MISMATCH');
+        assert.match(err.message, new RegExp(someoneElse.publicKey.toBase58()));
+        assert.match(err.message, new RegExp(treasury.publicKey.toBase58()));
+        return true;
+      },
+      'a mint this faucet cannot mint must be refused by name, not attempted'
+    );
+
+    // Refused BEFORE touching the chain: no ATA was created for the recipient,
+    // so the faucet spent nothing discovering it was misconfigured.
+    const strangerAta = getAssociatedTokenAddressSync(foreignMint, strangerRecipient.publicKey);
+    await assert.rejects(
+      () => getAccount(connection, strangerAta),
+      'the refusal must come before any account creation'
+    );
   }
 );

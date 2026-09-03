@@ -1,5 +1,7 @@
 # A connector answers when asked; it still never announces
 
+**Status:** Accepted. One **consequence** is superseded by [0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md) — the peer wire is no longer "private, plaintext and unauthenticated on its own segment"; it is deleted. Read alongside [0030](0030-an-operator-announces-a-node-the-node-still-does-not.md) for who the verb belongs to, and [0044](0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) for what an answer now carries.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 A connector tells whoever asks what its own configuration already says — its identity, and what a

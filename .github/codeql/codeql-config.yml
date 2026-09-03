@@ -1,0 +1,34 @@
+# CodeQL configuration for `.github/workflows/codeql.yml` (issue #1235).
+#
+# No `queries:` or `packs:` key on purpose: the suite is the one GitHub's
+# default setup ran (`query_suite: default`), and this file exists to filter
+# it, not to widen it. `crates/connector-bin/tests/fleet_release_gate.rs`
+# pins the filter below to exactly one query id, and refuses a `paths` /
+# `paths-ignore` carve-out, so an exclusion cannot be added -- or a
+# directory silenced -- without that test changing with it.
+name: connector
+
+query-filters:
+  # `rust/hard-coded-cryptographic-value` matches on a parameter NAME, and
+  # every payment-channel claim fixture in this repository has one called
+  # `nonce`: `sign_claim(&signer, &channel, 1, 100)`,
+  # `evm_claim_json(&channel, 1, 100)`, `client_claim_json(.., 1, 1_000, ..)`.
+  # That produced 463 open alerts on `main`, all in `#[cfg(test)]` modules
+  # and `tests/` files, and turned the check red on any PR touching a claim
+  # test (#1228 needed four dismissed by hand).
+  #
+  # A claim nonce is not a cryptographic nonce. It is the monotonic counter
+  # the counterparty signs over in the balance proof (ADR 0053, EIP-712) --
+  # a sequence number the tests are right to spell out as `1`, `2`, `3`.
+  # The literal amounts beside it are the same kind of thing.
+  #
+  # Where a REAL hard-coded key would live, this query cannot see it and
+  # is not the guard: every key a node holds is a file path in the config
+  # -- `[signer] key_file`, `[settlement.evm.key] key_file`,
+  # `[settlement.solana.key] key_file` -- never a literal, by ADR 0009 and
+  # ADR 0012, and `tools/ci/check-tracked-secrets.sh` fails the build on
+  # tracked key material. Nothing else is excluded here; the other open
+  # rules (`rust/cleartext-logging`, `actions/missing-workflow-permissions`)
+  # are real and stay on.
+  - exclude:
+      id: rust/hard-coded-cryptographic-value

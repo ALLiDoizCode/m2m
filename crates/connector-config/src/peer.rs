@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::path::PathBuf;
 
 use serde::Deserialize;
 use url::Url;
@@ -9,13 +8,62 @@ use crate::error::ConfigError;
 
 /// The default for `claim_ack_timeout_ms` and `peer_answer_timeout_ms`
 /// (`peer-carriage-spec.md` §6.3): thirty seconds each.
-const DEFAULT_PEER_TIMEOUT_MS: u64 = 30_000;
+///
+/// Public because a peering established at runtime (ADR 0058) has no
+/// `[[peers]]` row to read a timeout off and must land on the same number a
+/// config-file peering that wrote none does -- read from here rather than
+/// typed again somewhere the two could drift.
+pub const DEFAULT_PEER_TIMEOUT_MS: u64 = 30_000;
+
+/// The default `max_packet_amount` (ADR 0042, "The cap"): the largest
+/// amount this connector will forward to one peer in a **single packet**,
+/// in the settlement asset's own base units -- 6-decimal USDC everywhere on
+/// this fleet (ADR 0010, `docs/usdc-cross-chain-settlement.md`), so this is
+/// **1 USDC**.
+///
+/// A default exists at all because ADR 0042 requires one: the cap is the
+/// most a single theft by a next hop can take, and an operator who never
+/// writes the field must still be bounded. Public so the runtime reads this
+/// number rather than restating it, so a peer with no row of its own (one
+/// added at runtime over the operator surface, issue #884) is bounded by
+/// exactly the same figure a config-file peer that left the field unwritten
+/// is.
+///
+/// # Why 1 000 000, and what was inspected to pick it
+///
+/// The number had to clear everything the live devnet actually carries by a
+/// wide margin, so turning the cap on refuses nothing that works today:
+///
+/// * `infra/linode-relay/connector-rust.toml` prices `g.toon.relay` at
+///   **1** µUSDC per write (buzz huddles, per audio frame at 49 fps), and
+///   `infra/linode-store/connector-rust.toml` prices `g.toon.ario` at
+///   **1000**. `crates/connector-bin/tests/devnet_configs_load.rs` pins both
+///   as `EXPECTED_RELAY_PRICE`/`EXPECTED_STORE_PRICE`, and
+///   `docs/devnet-pricing.md` is the committed table they come from.
+/// * The largest *forwarded* amount this fleet ever ran was the retired
+///   apex's `g.toon.ario` leg: a client paid `1002`, the apex kept a fee of
+///   `2`, and **1000** went over the peering (`docs/devnet-pricing.md`, "The
+///   apex forward"; `docs/protocol/money-model-pre-868.md`'s worked example).
+/// * The largest single packet observed live on the fleet is **1998**
+///   (the parallel-fleet comparison's `[write] … amount=1998`, a record
+///   since deleted from `docs/operators/`; in git history), and the retired TypeScript `announcePrice`
+///   buffer -- the biggest figure any devnet config ever named -- was
+///   **2000**.
+///
+/// So 1 000 000 sits ~500x above the largest amount this fleet has ever put
+/// in one packet and 1000x above its most expensive committed route, while
+/// still being a real bound: one packet to one peer can never carry more
+/// than a dollar. Neither devnet box configures a peering at all today, so
+/// nothing on the fleet is even reached by this check -- the margin is for
+/// the next peering, and an operator who wants more writes
+/// `max_packet_amount` on that peer's own `[[peers]]` row.
+pub const DEFAULT_MAX_PACKET_AMOUNT: u64 = 1_000_000;
 
 /// Which carriage a peering rides (`peer-carriage-spec.md` §0.1). There are
 /// exactly two, and neither is selected by a `transport` field: a
 /// connector's *expose* set says which listeners it opens, and each peer's
 /// endpoint **scheme** says which carriage this connector dials that peer
-/// on (§2.1). ADR 0027 deleted the raw-TCP peer wire, so there is no third
+/// on (§2.1). ADR 0027 deleted the raw-TCP transport, so there is no third
 /// value and nothing to add one for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerCarriage {
@@ -60,7 +108,14 @@ impl PeerCarriage {
     /// laptop-runnable end-to-end test can point one connector at another's
     /// loopback socket without a TLS terminator in the harness; it is not
     /// a deployment shape.
-    fn from_scheme_allowing_plaintext(scheme: &str, allow_plaintext: bool) -> Option<PeerCarriage> {
+    /// Public because a peering established at runtime from a URL (ADR
+    /// 0058) decides its carriage by exactly this rule and must not grow
+    /// a second copy of it: §2.1 is one sentence, and two implementations
+    /// of one sentence is how a `wss://` peering ends up dialed over HTTP.
+    pub fn from_scheme_allowing_plaintext(
+        scheme: &str,
+        allow_plaintext: bool,
+    ) -> Option<PeerCarriage> {
         match PeerCarriage::from_scheme(scheme) {
             Some(carriage) => Some(carriage),
             None if allow_plaintext => match scheme {
@@ -150,59 +205,77 @@ impl std::str::FromStr for PeerExposure {
     }
 }
 
-/// Whether an uncovered peer PREPARE (issue #880, owner decision #868: every
-/// peer PREPARE carries a covering claim, or it is refused with the client
-/// edge's own x402 greeting) is actually refused, or admitted and logged.
+/// Whether a peer PREPARE this connector would **forward** onward (ADR
+/// 0042's item 3) is refused when it arrives uncovered, or admitted and
+/// logged.
 ///
-/// **Temporary migration knob (issue #883, child B6).** `Enforce` is the
-/// permanent behaviour and the default -- omitting the field, or writing
-/// nothing, means refuse exactly as issue #880 shipped. `Observe` exists only
-/// for the fleet rollout's canary step: it logs the same
-/// `peer PREPARE ... no claim covers this packet's price` line but does not
-/// refuse the packet, so an operator can watch a box's logs for admissions
-/// before flipping it to enforce (`docs/operators/claim-policy-rollout.md`).
+/// **The only claim-enforcement knob a peering still has.** Its sibling
+/// `claim_enforcement` -- ADR 0029's rule for an arrival to a priced
+/// **termination** -- was deleted with its `"observe"` escape hatch (ADR
+/// 0042 item 4, issue #1077); a terminated arrival is now always enforced
+/// and the key is a parsed-and-rejected tombstone
+/// ([`ConfigError::PeerClaimEnforcementRemoved`]). This field survived that
+/// deletion because the two migrations default in opposite directions and
+/// end on different days:
 ///
-/// **Dated for removal.** Once every `[[peers]]` row across the fleet reads
-/// `Enforce` (the default, so in practice once no config sets `Observe`
-/// anymore) and the rollout's own runbook confirms it, this variant and the
-/// field that selects it should be deleted -- the same removed-field-trap
-/// convention `ceiling`/`flush_interval_ms` now use (`ConfigError::
-/// PeerCeilingRemoved`, `resolve_peers`). Target: no later than the two-node
-/// fleet epic (toon-meta#316) closing, or 2026-11-01, whichever is first.
+/// - Terminated arrivals had been enforced since issue #880, so `Enforce`
+///   was the default there and `"observe"` was the escape hatch, dated for
+///   removal from the day it shipped.
+/// - Forwarded arrivals have **never** been charged: neither box on the
+///   fleet covers a forward yet (`[[pay_channels]]` shipped but is opt-in
+///   per peering and no committed config writes one), so a default of
+///   `Enforce` would stop forwarding across the fleet the moment the binary
+///   rolled. [`ForwardedClaimEnforcement::Observe`] is therefore the
+///   **default**, and an operator flips a peering to
+///   [`ForwardedClaimEnforcement::Enforce`] once that peering's counterparty
+///   is covering its forwards.
+///
+/// Folding the two into one field would have made one of those defaults
+/// wrong, and folding them into one *variant set* would have tied this
+/// field's default to the terminated escape hatch's dated deletion --
+/// which has since happened, and would have taken this default with it.
+///
+/// **Temporary, like its sibling.** Once every peering across the fleet
+/// covers its forwards and reads `Enforce`, this field and its `Observe`
+/// variant should be deleted so the ADR 0042 rule is simply the behaviour,
+/// using the same removed-field-trap convention `ceiling`/`flush_interval_ms`
+/// use (`ConfigError::PeerCeilingRemoved`, [`resolve_peers`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ClaimEnforcement {
-    /// Refuse an uncovered peer PREPARE (`F06_UNEXPECTED_PAYMENT` + the x402
-    /// greeting). The permanent, default behaviour.
+pub enum ForwardedClaimEnforcement {
+    /// Admit an uncovered forwarded arrival, logging it exactly the way a
+    /// refusal would be logged. **The default**, because enforcing by
+    /// default breaks a fleet whose send halves are not live yet.
     #[default]
-    Enforce,
-    /// Admit an uncovered peer PREPARE, logging it the same way a refusal
-    /// would be logged. Migration-only; see the type's own documentation.
     Observe,
+    /// Refuse an uncovered forwarded arrival (`F06_UNEXPECTED_PAYMENT` plus
+    /// the x402 greeting), the same refusal a priced termination's arrival
+    /// gets. ADR 0042's permanent rule, opted into per peering.
+    Enforce,
 }
 
-impl ClaimEnforcement {
+impl ForwardedClaimEnforcement {
     /// The spelling an operator writes.
     pub fn name(self) -> &'static str {
         match self {
-            ClaimEnforcement::Enforce => "enforce",
-            ClaimEnforcement::Observe => "observe",
+            ForwardedClaimEnforcement::Observe => "observe",
+            ForwardedClaimEnforcement::Enforce => "enforce",
         }
     }
 }
 
-impl fmt::Display for ClaimEnforcement {
+impl fmt::Display for ForwardedClaimEnforcement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
 }
 
-impl std::str::FromStr for ClaimEnforcement {
+impl std::str::FromStr for ForwardedClaimEnforcement {
     type Err = ();
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "enforce" => Ok(ClaimEnforcement::Enforce),
-            "observe" => Ok(ClaimEnforcement::Observe),
+            "observe" => Ok(ForwardedClaimEnforcement::Observe),
+            "enforce" => Ok(ForwardedClaimEnforcement::Enforce),
             _ => Err(()),
         }
     }
@@ -223,195 +296,6 @@ pub(crate) fn parse_peer_exposure(value: Option<String>) -> Result<PeerExposure,
     }
 }
 
-/// The `credential` subtable of a `[[peers]]` entry as written in the
-/// config file: **where the peering's shared secret comes from**, spelled
-/// as exactly one of two mutually exclusive fields.
-///
-/// * `secret_file` -- a path to a file holding it. This is the form a
-///   deployed node uses, and the reason this field exists (issue #750):
-///   `infra/linode-node/connector-rust.toml` and its store twin are
-///   committed to a **public** repository, so a peering written with a
-///   literal cannot be committed at all, and the live apex↔store peering
-///   was configured on the boxes only -- exactly the untracked-config
-///   drift the Phase 0 reconciliation (#744) closed. Every other secret in
-///   those same files is already a file reference (`[signer] key_file`,
-///   `[settlement.*.key] key_file`); this makes the peering secret the
-///   same shape.
-/// * `secret` -- the literal. Still supported, and fine for a test fixture
-///   or a config that is never committed.
-///
-/// `deny_unknown_fields` (issue #556): both fields are optional and their
-/// absence is meaningful, so a mistyped `secert` or `secret_fle` would
-/// otherwise read as "neither is set" -- a peering that authenticates
-/// nobody while reading as configured.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawPeerCredential {
-    #[serde(default)]
-    secret: Option<String>,
-    #[serde(default)]
-    secret_file: Option<PathBuf>,
-}
-
-/// The literal never reaches a [`fmt::Debug`] rendering, for the same
-/// reason [`PeerCredential`]'s does not: a raw config is a whole-value
-/// thing, and a derived `Debug` anywhere on the path from file to
-/// [`PeerCredential`] is enough to put a peering secret in a log
-/// aggregator.
-impl fmt::Debug for RawPeerCredential {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RawPeerCredential")
-            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
-            .field("secret_file", &self.secret_file)
-            .finish()
-    }
-}
-
-impl RawPeerCredential {
-    /// Resolve this credential to the secret itself, reading `secret_file`
-    /// if that is the form the operator wrote.
-    ///
-    /// The file is read **here, at config load**, and not left as a
-    /// [`crate::SecretLocation`]-style pointer: a peering secret is
-    /// compared against on every arriving frame, and the alternative is a
-    /// node that starts, serves, and only discovers at the first peer
-    /// interaction that the file it was pointed at is not there. ADR 0009
-    /// puts that failure at load instead -- so a missing, unreadable or
-    /// empty file is a refuse-to-start error by name, exactly as
-    /// [`ConfigError::SignerKeyFileNotFound`] is for `[signer] key_file`,
-    /// and the path is resolved the same way that one is (by the OS,
-    /// against the process's working directory).
-    ///
-    /// The file's contents are **trimmed**. Operators write these with
-    /// `echo` and `openssl rand -hex 32 >`, both of which append a
-    /// newline, and a secret that failed to match because of one invisible
-    /// byte is the `P1` mismatch with no evidence at all
-    /// (`peer-carriage-spec.md` §1.6). The literal `secret` form is
-    /// deliberately **not** trimmed: it is byte-for-byte what it was
-    /// before this field existed.
-    fn resolve(self, id: &str) -> Result<PeerCredential, ConfigError> {
-        match (self.secret, self.secret_file) {
-            (Some(_), Some(_)) => Err(ConfigError::PeerCredentialAmbiguous { id: id.to_string() }),
-            (Some(secret), None) if !secret.is_empty() => Ok(PeerCredential { secret }),
-            (None, Some(path)) => {
-                if !path.is_file() {
-                    return Err(ConfigError::PeerSecretFileNotFound {
-                        id: id.to_string(),
-                        path,
-                    });
-                }
-                let contents = std::fs::read_to_string(&path).map_err(|source| {
-                    ConfigError::PeerSecretFileUnreadable {
-                        id: id.to_string(),
-                        path: path.clone(),
-                        source,
-                    }
-                })?;
-                let secret = contents.trim();
-                if secret.is_empty() {
-                    return Err(ConfigError::PeerSecretFileEmpty {
-                        id: id.to_string(),
-                        path,
-                    });
-                }
-                Ok(PeerCredential {
-                    secret: secret.to_string(),
-                })
-            }
-            // Neither field set, or `secret = ""`. One condition, because
-            // it is one outcome: a `[[peers]]` entry that names no secret
-            // to authenticate against.
-            (_, None) => Err(ConfigError::PeerCredentialMissing { id: id.to_string() }),
-        }
-    }
-}
-
-/// The shared secret a peering relation is authenticated by
-/// (`peer-carriage-spec.md` §1.4). One struct, one JSON shape
-/// (`{"peerId": …, "secret": …}`), two encodings -- the `auth`
-/// protocolData entry raw on BTP, `Toon-Peer-Auth: base64(JSON)` on HTTP.
-/// This crate carries only the secret; which bytes ride where is the
-/// carriages' business (issue #676).
-///
-/// The secret never appears in a [`fmt::Debug`] rendering: a `Config` is
-/// the kind of value that gets logged whole at startup, and a derived
-/// `Debug` is how a peering secret ends up in a log aggregator.
-#[derive(Clone, PartialEq, Eq)]
-pub struct PeerCredential {
-    secret: String,
-}
-
-impl PeerCredential {
-    /// A credential over `secret`, for a caller that is not
-    /// [`resolve_peers`] -- the dial side building what it will present, and
-    /// tests standing up a policy whose shape config load refuses to
-    /// produce (a peering with no `[[peer_channels]]` row, say, which is
-    /// [`ConfigError::PeerChannelUnbound`] at load but is exactly the P2
-    /// branch a role decision must still get right).
-    ///
-    /// It does **not** refuse an empty secret, and that is deliberate: the
-    /// refusal that matters is [`PeerCredential::matches`] returning `false`
-    /// for one, which holds for every credential however it was built. A
-    /// constructor that refused instead would move the guarantee to the
-    /// construction site, where a future caller can forget it.
-    pub fn new(secret: impl Into<String>) -> Self {
-        PeerCredential {
-            secret: secret.into(),
-        }
-    }
-
-    /// Whether `presented` is this peering's configured secret.
-    ///
-    /// Two properties, both load-bearing (`peer-carriage-spec.md` §1.2):
-    ///
-    /// * the comparison does not return early on the first differing byte,
-    ///   so it does not leak the secret's prefix by timing; and
-    /// * **an empty configured secret matches nothing**, including an empty
-    ///   presented secret. An empty secret is also refused at load
-    ///   ([`ConfigError::PeerCredentialMissing`]), so this is the second of
-    ///   two locks on one door -- the one that still holds if a
-    ///   [`PeerCredential`] is ever built by something other than
-    ///   [`resolve_peers`]. A credential that matched everything is exactly
-    ///   the `no-auth` quasi-peer regression §1.9 is named for.
-    pub fn matches(&self, presented: &str) -> bool {
-        if self.secret.is_empty() {
-            return false;
-        }
-        constant_time_eq(self.secret.as_bytes(), presented.as_bytes())
-    }
-
-    /// The secret this connector presents when it dials this peer.
-    pub fn secret(&self) -> &str {
-        &self.secret
-    }
-}
-
-impl fmt::Debug for PeerCredential {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PeerCredential")
-            .field("secret", &"<redacted>")
-            .finish()
-    }
-}
-
-/// Compare two byte strings without returning early on a mismatch.
-///
-/// The length difference is folded in rather than short-circuited on, so a
-/// wrong-length secret costs the same as a right-length one. `subtle`'s
-/// `ConstantTimeEq` is the idiomatic tool, but it wants equal-length slices
-/// and this crate has no other reason to take a cryptography dependency;
-/// the accumulate-then-compare shape below is the same one.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut difference: u8 = u8::from(a.len() != b.len());
-    let width = a.len().max(b.len());
-    for index in 0..width {
-        let left = a.get(index).copied().unwrap_or(0);
-        let right = b.get(index).copied().unwrap_or(0);
-        difference |= left ^ right;
-    }
-    difference == 0
-}
-
 /// A `[[peers]]` entry as written in the config file: one peering
 /// relation, named so a `[[routes]]` entry can target it by `peer_id`.
 ///
@@ -425,18 +309,27 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// kept the same way (ADR 0031, ADR 0033, issue #882): the credit window
 /// they bounded is retired now that every peer PREPARE carries its own
 /// covering claim, and a devnet box's bind-mounted TOML still names them.
+/// `credential` joins them under ADR 0060: the `{peerId, secret}` bearer
+/// secret is deleted outright, and a peering is proven by a verified claim
+/// on one of its `[[peer_channels]]` rows instead.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawPeer {
     id: String,
-    /// Removed with the raw-TCP peer wire (ADR 0027, issue #679); a peer
+    /// Removed with the raw-TCP transport (ADR 0027, issue #679); a peer
     /// is reached by `endpoint` now.
     #[serde(default)]
     addr: Option<toml::Value>,
     #[serde(default)]
     endpoint: Option<String>,
+    /// Deleted with the peer shared secret (ADR 0060, issue #1157): role
+    /// is P2 + P3 -- a channel binding and a verified claim signature --
+    /// and a bearer string decides nothing. Parsed as an opaque value only
+    /// so a config that still writes one is refused **by name**
+    /// ([`ConfigError::PeerCredentialRemoved`]) rather than dropped, the
+    /// posture ADR 0009 requires of every removed key.
     #[serde(default)]
-    credential: Option<RawPeerCredential>,
+    credential: Option<toml::Value>,
     /// Removed with the credit window (ADR 0031, ADR 0033, issue #882);
     /// there is no trailing exposure left for a ceiling to bound.
     #[serde(default)]
@@ -450,19 +343,38 @@ pub(crate) struct RawPeer {
     claim_ack_timeout_ms: Option<u64>,
     #[serde(default)]
     peer_answer_timeout_ms: Option<u64>,
-    /// The B6 migration knob (issue #883): `"observe"` admits and logs an
-    /// uncovered peer PREPARE instead of refusing it. Omitted, or written
-    /// `"enforce"`, is [`ClaimEnforcement::Enforce`] -- the default and the
-    /// permanent behaviour. See [`ClaimEnforcement`]'s own documentation for
-    /// why this field is temporary.
+    /// Removed with the B6 migration ramp it selected (ADR 0042 item 4,
+    /// issue #1077): a terminated arrival is enforced unconditionally, so
+    /// there is no mode left for this key to pick. Parsed as an opaque
+    /// value only so it can be refused **by name**, the way `ceiling` and
+    /// `flush_interval_ms` are.
     #[serde(default)]
-    claim_enforcement: Option<String>,
+    claim_enforcement: Option<toml::Value>,
+    /// ADR 0042's item 3: `"enforce"` refuses a peer PREPARE this connector
+    /// would forward onward when it arrives without a claim covering the
+    /// packet's own `amount`. Omitted, or written `"observe"`, is
+    /// [`ForwardedClaimEnforcement::Observe`] -- admitted and logged, the
+    /// **default**, because the fleet's send halves are not live yet. See
+    /// [`ForwardedClaimEnforcement`] for why it outlived the
+    /// `claim_enforcement` knob it was deliberately kept separate from.
+    #[serde(default)]
+    forwarded_claim_enforcement: Option<String>,
+    /// ADR 0042's cap: the largest amount this connector will forward to
+    /// this peer in one packet. Omitted is [`DEFAULT_MAX_PACKET_AMOUNT`] --
+    /// there is no "unbounded" spelling, deliberately.
+    #[serde(default)]
+    max_packet_amount: Option<u64>,
+    /// ADR 0061's fee: the flat amount this connector retains for carrying
+    /// one packet to this peer. Omitted is zero -- free carriage, and the
+    /// value every config in this tree that never wrote one already had.
+    #[serde(default)]
+    fee: Option<u64>,
 }
 
 /// A fully validated peering relation. Constructed only by
 /// [`resolve_peers`], so a value that exists has a non-empty id unique
-/// among every other configured peer, a non-empty credential, and -- if it
-/// carries an endpoint at all -- one whose scheme names a real carriage.
+/// among every other configured peer and -- if it carries an endpoint at
+/// all -- one whose scheme names a real carriage.
 ///
 /// One value per **peering relation**, never per carriage and never per
 /// connection (`peer-carriage-spec.md` §2.5): the claim watermarks belong
@@ -473,16 +385,18 @@ pub struct PeerConfig {
     id: String,
     endpoint: Option<Url>,
     dial: Option<PeerCarriage>,
-    credential: PeerCredential,
     can_originate: bool,
     claim_ack_timeout_ms: u64,
     peer_answer_timeout_ms: u64,
-    claim_enforcement: ClaimEnforcement,
+    forwarded_claim_enforcement: ForwardedClaimEnforcement,
+    max_packet_amount: u64,
+    fee: u64,
 }
 
 impl PeerConfig {
     /// This peering relation's id -- what a `[[routes]]` entry's `peer_id`
-    /// refers to, and what the credential JSON names as its `peerId`.
+    /// refers to, and the name every `[[peer_channels]]` row of this
+    /// relation binds its channels under.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -498,11 +412,6 @@ impl PeerConfig {
     /// by the endpoint's scheme (§2.1). `None` for an accept-only peering.
     pub fn dial(&self) -> Option<PeerCarriage> {
         self.dial
-    }
-
-    /// The shared secret this peering is authenticated by (§1.4).
-    pub fn credential(&self) -> &PeerCredential {
-        &self.credential
     }
 
     /// Whether this connector can ever send a packet to this peer.
@@ -529,12 +438,48 @@ impl PeerConfig {
         self.peer_answer_timeout_ms
     }
 
-    /// Whether an uncovered peer PREPARE from this peering is refused or
-    /// admitted-and-logged. Defaults to [`ClaimEnforcement::Enforce`]; see
-    /// that type for why the [`ClaimEnforcement::Observe`] alternative
-    /// exists and is temporary (issue #883).
-    pub fn claim_enforcement(&self) -> ClaimEnforcement {
-        self.claim_enforcement
+    /// Whether an uncovered **forwarded** arrival from this peering is
+    /// refused or admitted-and-logged (ADR 0042's item 3). Defaults to
+    /// [`ForwardedClaimEnforcement::Observe`], the permissive way, for the
+    /// reason that type documents. An uncovered arrival to a priced
+    /// **termination** has no such knob: it is always refused (ADR 0029,
+    /// issue #880; the `claim_enforcement` escape hatch was deleted by
+    /// issue #1077).
+    pub fn forwarded_claim_enforcement(&self) -> ForwardedClaimEnforcement {
+        self.forwarded_claim_enforcement
+    }
+
+    /// This peering's **cap** (ADR 0042): the largest amount this connector
+    /// will forward to it in a single packet. A packet needing more is
+    /// refused with `T04`, never carried and never split.
+    ///
+    /// Bounds one packet, not an accumulation -- ADR 0033 retired the
+    /// exposure ceiling and it is not coming back (see `CONTEXT.md`'s
+    /// glossary, which keeps "ceiling" and "cap" apart for exactly this
+    /// reason). Defaults to [`DEFAULT_MAX_PACKET_AMOUNT`], so a peering that
+    /// wrote nothing is still bounded.
+    pub fn max_packet_amount(&self) -> u64 {
+        self.max_packet_amount
+    }
+
+    /// This peering's flat per-packet **fee** (ADR 0010, ADR 0061): what
+    /// this connector retains for carrying one packet to this counterparty,
+    /// realized on the wire as the difference between the amount that
+    /// arrived and the amount forwarded, and added to the accumulated cost
+    /// of a reject this peer itself decided on (ADR 0011).
+    ///
+    /// Flat, per packet, and independent of the amount carried. It attaches
+    /// here rather than to a `[[routes]]` entry because this hop does the
+    /// same work whichever prefix the packet was addressed to (ADR 0061);
+    /// `[[routes]] fee` is a refuse-to-start tombstone
+    /// ([`crate::ConfigError::RouteFeeRemoved`]).
+    ///
+    /// Defaults to zero -- free carriage. Unlike
+    /// [`Self::max_packet_amount`], which exists to bound a loss, a fee
+    /// bounds nothing, so "the operator wrote no number" can safely mean
+    /// "charge nothing" here.
+    pub fn fee(&self) -> u64 {
+        self.fee
     }
 }
 
@@ -574,6 +519,22 @@ pub(crate) fn resolve_peers(
         if peer.flush_interval_ms.is_some() {
             return Err(ConfigError::PeerFlushIntervalRemoved { id: peer.id });
         }
+        // ADR 0042 item 4 (issue #1077): the B6 ramp is gone, so `"observe"`
+        // no longer names a mode -- and `"enforce"` names the only behaviour
+        // there is. Refused by name rather than ignored, because a config
+        // still writing `"observe"` was written by an operator who believes
+        // this peering admits uncovered arrivals, and it does not.
+        if peer.claim_enforcement.is_some() {
+            return Err(ConfigError::PeerClaimEnforcementRemoved { id: peer.id });
+        }
+        // ADR 0060 (issue #1157): the `{peerId, secret}` bearer credential
+        // is deleted, not renamed. Refused by name rather than ignored,
+        // because an operator who still writes one believes this peering is
+        // authenticated by it, and a claim signature is what authenticates
+        // it now.
+        if peer.credential.is_some() {
+            return Err(ConfigError::PeerCredentialRemoved { id: peer.id });
+        }
         if !seen.insert(peer.id.clone()) {
             return Err(ConfigError::DuplicatePeerId { id: peer.id });
         }
@@ -602,34 +563,33 @@ pub(crate) fn resolve_peers(
             }
         };
 
-        // P1 can never be satisfied without a secret to compare against,
-        // and an empty one matches nothing by construction
-        // ([`PeerCredential::matches`]) -- so a peering configured with
-        // either is one that can only ever admit its counterparty as an
-        // ordinary client. Refused here rather than at the first frame,
-        // because the symptom otherwise is "peering configured, nothing
-        // peers, no error anywhere" (§1.6). A `secret_file` that cannot be
-        // read is the same refusal for the same reason
-        // ([`RawPeerCredential::resolve`]).
-        let credential = match peer.credential {
-            Some(written) => written.resolve(&peer.id)?,
-            None => return Err(ConfigError::PeerCredentialMissing { id: peer.id }),
+        // ADR 0042 (item 3): a mistyped `forwarded_claim_enforcement` is
+        // refused by name for the same reason its sibling above is, and the
+        // stakes run the other way -- a typo meant as "enforce" that fell
+        // through to the default would leave this peering carrying forwards
+        // for free, silently, which is precisely the gap ADR 0042 closes.
+        let forwarded_claim_enforcement = match peer.forwarded_claim_enforcement {
+            None => ForwardedClaimEnforcement::default(),
+            Some(value) => {
+                value
+                    .parse()
+                    .map_err(|()| ConfigError::InvalidForwardedClaimEnforcement {
+                        id: peer.id.clone(),
+                        value,
+                    })?
+            }
         };
 
-        // Issue #883 (B6): a mistyped `claim_enforcement` is refused by
-        // name, the same convention `peer_expose` uses -- a value this
-        // build does not recognize is not the same as the field being
-        // absent, and treating it as "enforce" by falling through would
-        // hide a typo that meant "observe" behind the strictest behaviour
-        // ever going unnoticed on a receiver that never actually observed.
-        let claim_enforcement = match peer.claim_enforcement {
-            None => ClaimEnforcement::default(),
-            Some(value) => value
-                .parse()
-                .map_err(|()| ConfigError::InvalidClaimEnforcement {
-                    id: peer.id.clone(),
-                    value,
-                })?,
+        // ADR 0042's cap. `0` is refused by name rather than taken
+        // literally: a cap of zero refuses every packet this peering could
+        // ever carry, which is a peering that silently does nothing, and
+        // "I meant to disable the cap" is the likeliest thing a `0` was
+        // written for. There is no disabling spelling -- the cap's whole
+        // point is that a bound always exists.
+        let max_packet_amount = match peer.max_packet_amount {
+            None => DEFAULT_MAX_PACKET_AMOUNT,
+            Some(0) => return Err(ConfigError::PeerMaxPacketAmountZero { id: peer.id }),
+            Some(written) => written,
         };
 
         // A peering with nothing to dial, on a connector with nothing to
@@ -645,13 +605,14 @@ pub(crate) fn resolve_peers(
             id: peer.id,
             endpoint,
             dial,
-            credential,
             can_originate,
             claim_ack_timeout_ms: peer.claim_ack_timeout_ms.unwrap_or(DEFAULT_PEER_TIMEOUT_MS),
             peer_answer_timeout_ms: peer
                 .peer_answer_timeout_ms
                 .unwrap_or(DEFAULT_PEER_TIMEOUT_MS),
-            claim_enforcement,
+            forwarded_claim_enforcement,
+            max_packet_amount,
+            fee: peer.fee.unwrap_or(0),
         });
     }
 
@@ -661,42 +622,21 @@ pub(crate) fn resolve_peers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    /// A `credential` written as a literal -- the pre-#750 form, still the
-    /// shape most of these tests want.
-    fn literal(secret: &str) -> RawPeerCredential {
-        RawPeerCredential {
-            secret: Some(secret.to_string()),
-            secret_file: None,
-        }
-    }
-
-    /// A `credential` written as a `secret_file`, over a temp file holding
-    /// `contents` verbatim. The handle is returned so the caller keeps the
-    /// file alive across the resolve.
-    fn secret_file(contents: &str) -> (RawPeerCredential, tempfile::NamedTempFile) {
-        let mut file = tempfile::NamedTempFile::new().expect("temp secret file");
-        file.write_all(contents.as_bytes()).expect("write secret");
-        file.flush().expect("flush secret");
-        let credential = RawPeerCredential {
-            secret: None,
-            secret_file: Some(file.path().to_path_buf()),
-        };
-        (credential, file)
-    }
 
     fn raw(id: &str) -> RawPeer {
         RawPeer {
             id: id.to_string(),
             addr: None,
             endpoint: Some("wss://peer.example:443/btp".to_string()),
-            credential: Some(literal("shared-secret")),
+            credential: None,
             ceiling: None,
             flush_interval_ms: None,
             claim_ack_timeout_ms: None,
             peer_answer_timeout_ms: None,
             claim_enforcement: None,
+            forwarded_claim_enforcement: None,
+            max_packet_amount: None,
+            fee: None,
         }
     }
 
@@ -715,56 +655,198 @@ mod tests {
         assert!(peers[0].can_originate());
         assert_eq!(peers[0].claim_ack_timeout_ms(), 30_000);
         assert_eq!(peers[0].peer_answer_timeout_ms(), 30_000);
-        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
     }
 
-    /// Issue #883 (B6): a peer that writes nothing gets the permanent
-    /// behaviour, not the migration-only one -- the same "omit for the
-    /// default" convention `peer_expose` uses.
+    /// ADR 0042 item 4 (issue #1077): the B6 ramp is gone, so a config that
+    /// still writes the key is refused **by name** rather than ignored. The
+    /// `"observe"` spelling is the one that matters -- an operator running
+    /// it believes this peering admits uncovered arrivals to a priced
+    /// termination, and no build does that any more.
     #[test]
-    fn claim_enforcement_defaults_to_enforce() {
+    fn claim_enforcement_observe_is_refused_as_a_removed_key() {
+        let mut entry = raw("peer-b");
+        entry.claim_enforcement = Some(toml::Value::String("observe".to_string()));
+
+        assert!(matches!(
+            resolve_peers(vec![entry], PeerExposure::Neither, false),
+            Err(ConfigError::PeerClaimEnforcementRemoved { ref id }) if id == "peer-b"
+        ));
+    }
+
+    /// The `"enforce"` spelling names what every build now does
+    /// unconditionally -- and is refused just the same, because a key that
+    /// is accepted for one value and rejected for another teaches an
+    /// operator that the key still selects something.
+    #[test]
+    fn claim_enforcement_enforce_is_refused_as_a_removed_key_too() {
+        let mut entry = raw("peer-b");
+        entry.claim_enforcement = Some(toml::Value::String("enforce".to_string()));
+
+        assert!(matches!(
+            resolve_peers(vec![entry], PeerExposure::Neither, false),
+            Err(ConfigError::PeerClaimEnforcementRemoved { ref id }) if id == "peer-b"
+        ));
+    }
+
+    /// ADR 0042 (item 3), the fleet-safety property: a peer that writes
+    /// nothing forwards exactly as it did before this knob existed --
+    /// uncovered forwarded arrivals admitted and logged, never refused.
+    /// Defaulting this the way the deleted `claim_enforcement` defaulted
+    /// would have stopped forwarding across a fleet whose send halves are
+    /// not live.
+    #[test]
+    fn forwarded_claim_enforcement_defaults_to_observe() {
         let peers =
             resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
 
-        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
+        assert_eq!(
+            peers[0].forwarded_claim_enforcement(),
+            ForwardedClaimEnforcement::Observe
+        );
     }
 
-    /// The migration's whole point: a peer explicitly opted into the canary
-    /// step resolves to `Observe`.
+    /// Keeping the two knobs separate is what let one be deleted without
+    /// the other: a peering that writes neither field enforces the
+    /// terminated rule unconditionally (ADR 0029, no knob left) while still
+    /// only observing the forwarded one (ADR 0042). Had they been folded
+    /// into one field, issue #1077 would have taken this default with it.
     #[test]
-    fn claim_enforcement_observe_is_parsed_by_name() {
+    fn deleting_the_terminated_knob_left_the_forwarded_default_permissive() {
+        let peers =
+            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(
+            peers[0].forwarded_claim_enforcement(),
+            ForwardedClaimEnforcement::Observe
+        );
+    }
+
+    /// The flip an operator makes once this peering's counterparty covers
+    /// its forwards.
+    #[test]
+    fn forwarded_claim_enforcement_enforce_is_parsed_by_name() {
         let mut entry = raw("peer-b");
-        entry.claim_enforcement = Some("observe".to_string());
+        entry.forwarded_claim_enforcement = Some("enforce".to_string());
 
         let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
 
-        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Observe);
+        assert_eq!(
+            peers[0].forwarded_claim_enforcement(),
+            ForwardedClaimEnforcement::Enforce
+        );
     }
 
     /// Writing the default out explicitly is the same as omitting it.
     #[test]
-    fn claim_enforcement_enforce_is_parsed_by_name() {
+    fn forwarded_claim_enforcement_observe_is_parsed_by_name() {
         let mut entry = raw("peer-b");
-        entry.claim_enforcement = Some("enforce".to_string());
+        entry.forwarded_claim_enforcement = Some("observe".to_string());
 
         let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
 
-        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
+        assert_eq!(
+            peers[0].forwarded_claim_enforcement(),
+            ForwardedClaimEnforcement::Observe
+        );
     }
 
-    /// A mistyped value is refused by name, not silently read as the
-    /// default -- the same reasoning `exposure_refuses_an_unrecognized_spelling_by_name`
-    /// documents for `peer_expose`: a typo that meant "observe" must not
-    /// silently become the strictest behaviour there is.
+    /// A mistyped value is refused by name. The stakes are the mirror image
+    /// of the deleted `claim_enforcement`'s: here a typo meant as "enforce"
+    /// would fall through to the permissive default and carry forwards for
+    /// free.
     #[test]
-    fn claim_enforcement_refuses_an_unrecognized_spelling_by_name() {
+    fn forwarded_claim_enforcement_refuses_an_unrecognized_spelling_by_name() {
         let mut entry = raw("peer-b");
-        entry.claim_enforcement = Some("log-only".to_string());
+        entry.forwarded_claim_enforcement = Some("enfroce".to_string());
 
         assert!(matches!(
             resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::InvalidClaimEnforcement { ref id, ref value })
-                if id == "peer-b" && value == "log-only"
+            Err(ConfigError::InvalidForwardedClaimEnforcement { ref id, ref value })
+                if id == "peer-b" && value == "enfroce"
+        ));
+    }
+
+    /// ADR 0042: an operator who never writes a cap still gets one. This is
+    /// the property the whole default exists for -- there is no spelling
+    /// that leaves a peering unbounded.
+    #[test]
+    fn a_peer_that_configures_no_cap_still_gets_the_default_one() {
+        let peers =
+            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].max_packet_amount(), DEFAULT_MAX_PACKET_AMOUNT);
+        assert_eq!(peers[0].max_packet_amount(), 1_000_000);
+    }
+
+    /// The cap is per peering, so two rows in one file hold two different
+    /// caps -- how far this connector trusts each peer, separately.
+    #[test]
+    fn each_peering_carries_its_own_cap() {
+        let mut tight = raw("peer-tight");
+        tight.max_packet_amount = Some(50);
+        let mut generous = raw("peer-generous");
+        generous.max_packet_amount = Some(5_000_000);
+
+        let peers =
+            resolve_peers(vec![tight, generous], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].max_packet_amount(), 50);
+        assert_eq!(peers[1].max_packet_amount(), 5_000_000);
+    }
+
+    /// ADR 0061: a peering that writes no fee carries for free. Unlike the
+    /// cap, a fee bounds nothing, so an unwritten one can safely mean
+    /// "charge nothing" -- and it is what every config in this tree that
+    /// never wrote a `[[routes]] fee` already meant.
+    #[test]
+    fn a_peering_that_configures_no_fee_carries_for_free() {
+        let peers =
+            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].fee(), 0);
+    }
+
+    /// The fee is per peering, so two rows in one file hold two different
+    /// fees -- what this connector charges to carry to each counterparty,
+    /// separately. It is emphatically not per prefix: that is the whole of
+    /// ADR 0061, and why `[[routes]] fee` is now a tombstone.
+    #[test]
+    fn each_peering_carries_its_own_fee() {
+        let mut cheap = raw("peer-cheap");
+        cheap.fee = Some(50);
+        let mut dear = raw("peer-dear");
+        dear.fee = Some(100);
+
+        let peers =
+            resolve_peers(vec![cheap, dear], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].fee(), 50);
+        assert_eq!(peers[1].fee(), 100);
+    }
+
+    /// `fee = 0` written down is free carriage the operator chose, and
+    /// resolves exactly like the unwritten case: there is nothing to refuse
+    /// here, unlike a cap of zero below.
+    #[test]
+    fn a_fee_of_zero_is_deliberate_free_carriage() {
+        let mut entry = raw("peer-b");
+        entry.fee = Some(0);
+
+        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
+        assert_eq!(peers[0].fee(), 0);
+    }
+
+    /// `0` is refused by name: it would refuse every packet the peering
+    /// could carry, and it is what someone reaching for a non-existent
+    /// "disable the cap" spelling would write.
+    #[test]
+    fn a_cap_of_zero_is_refused_by_name() {
+        let mut entry = raw("peer-b");
+        entry.max_packet_amount = Some(0);
+
+        assert!(matches!(
+            resolve_peers(vec![entry], PeerExposure::Neither, false),
+            Err(ConfigError::PeerMaxPacketAmountZero { ref id }) if id == "peer-b"
         ));
     }
 
@@ -840,236 +922,44 @@ mod tests {
         ));
     }
 
+    /// ADR 0060: the peering secret is deleted, not renamed. A config
+    /// that still writes one is refused **by name** -- never dropped and
+    /// never ignored -- because an operator who wrote it believes this
+    /// peering is authenticated by it, and a verified claim is what
+    /// authenticates it now.
     #[test]
-    fn an_empty_configured_secret_matches_nothing() {
-        let credential = PeerCredential {
-            secret: String::new(),
-        };
-
-        assert!(!credential.matches(""));
-        assert!(!credential.matches("anything"));
-    }
-
-    #[test]
-    fn a_configured_secret_matches_only_itself() {
-        let credential = PeerCredential {
-            secret: "shared-secret".to_string(),
-        };
-
-        assert!(credential.matches("shared-secret"));
-        assert!(!credential.matches("shared-secre"));
-        assert!(!credential.matches("shared-secret "));
-        assert!(!credential.matches(""));
-    }
-
-    #[test]
-    fn a_credential_never_debug_prints_its_secret() {
-        let credential = PeerCredential {
-            secret: "shared-secret".to_string(),
-        };
-
-        let rendered = format!("{credential:?}");
-
-        assert!(!rendered.contains("shared-secret"), "got: {rendered}");
-        assert!(rendered.contains("redacted"), "got: {rendered}");
-    }
-
-    // -- `secret_file` (issue #750). The peering secret is the one secret
-    // in these config files that could only ever be a literal, and these
-    // files are committed to a public repository.
-
-    /// The whole point: a peering whose secret came out of a file is the
-    /// same peering as one whose secret was a literal, and authenticates
-    /// identically -- same match, same non-matches.
-    #[test]
-    fn a_file_loaded_credential_authenticates_exactly_as_a_literal_one_does() {
-        let (credential, _file) = secret_file("shared-secret");
-        let mut entry = raw("peer-b");
-        entry.credential = Some(credential);
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-
-        let from_file = peers[0].credential();
-        let from_literal = PeerCredential::new("shared-secret");
-        assert_eq!(from_file, &from_literal);
-        assert_eq!(from_file.secret(), "shared-secret");
-        assert!(from_file.matches("shared-secret"));
-        assert!(!from_file.matches("wrong"));
-        assert!(!from_file.matches(""));
-    }
-
-    /// `openssl rand -hex 32 > peer.secret` and `echo … > peer.secret`
-    /// both append a newline, and a peering that failed to establish over
-    /// one invisible byte is a `P1` mismatch with no evidence at all.
-    #[test]
-    fn a_secret_file_is_trimmed_of_its_trailing_newline_and_whitespace() {
-        let (credential, _file) = secret_file("  shared-secret \t\r\n\n");
-        let mut entry = raw("peer-b");
-        entry.credential = Some(credential);
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-
-        assert!(peers[0].credential().matches("shared-secret"));
-    }
-
-    /// The literal form is *not* trimmed: it is byte-for-byte what it was
-    /// before `secret_file` existed.
-    #[test]
-    fn a_literal_secret_is_left_untrimmed() {
-        let mut entry = raw("peer-b");
-        entry.credential = Some(literal("shared-secret\n"));
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-
-        assert!(peers[0].credential().matches("shared-secret\n"));
-        assert!(!peers[0].credential().matches("shared-secret"));
-    }
-
-    #[test]
-    fn setting_both_secret_and_secret_file_is_refused_by_name() {
-        let (mut credential, _file) = secret_file("from-the-file");
-        credential.secret = Some("from-the-literal".to_string());
-        let mut entry = raw("peer-b");
-        entry.credential = Some(credential);
-
-        let result = resolve_peers(vec![entry], PeerExposure::Neither, false);
-
-        assert!(matches!(
-            result,
-            Err(ConfigError::PeerCredentialAmbiguous { ref id }) if id == "peer-b"
-        ));
-    }
-
-    /// A `credential = {}` that names neither field is the same outcome as
-    /// no `credential` table at all: nothing to authenticate against.
-    #[test]
-    fn setting_neither_secret_nor_secret_file_is_refused_by_name() {
-        let mut entry = raw("peer-b");
-        entry.credential = Some(RawPeerCredential {
-            secret: None,
-            secret_file: None,
-        });
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerCredentialMissing { ref id }) if id == "peer-b"
-        ));
-
-        let mut entry = raw("peer-b");
-        entry.credential = None;
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerCredentialMissing { ref id }) if id == "peer-b"
-        ));
-    }
-
-    #[test]
-    fn a_missing_secret_file_is_refused_by_name() {
-        let mut entry = raw("peer-b");
-        entry.credential = Some(RawPeerCredential {
-            secret: None,
-            secret_file: Some(PathBuf::from("/nonexistent/peer.secret")),
-        });
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerSecretFileNotFound { ref id, .. }) if id == "peer-b"
-        ));
-    }
-
-    /// A *directory* at the path is the unreadable case this test can
-    /// produce portably and without root: it exists, so it is not
-    /// `PeerSecretFileNotFound` for the "does not exist" reason, and
-    /// `is_file()` is what separates the two.
-    #[test]
-    fn a_secret_file_that_is_a_directory_is_refused_by_name() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut entry = raw("peer-b");
-        entry.credential = Some(RawPeerCredential {
-            secret: None,
-            secret_file: Some(dir.path().to_path_buf()),
-        });
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerSecretFileNotFound { ref id, .. }) if id == "peer-b"
-        ));
-    }
-
-    /// A file that exists and passes `is_file()` but whose bytes are not
-    /// text: `read_to_string` fails, and that is the unreadable branch.
-    #[test]
-    fn a_secret_file_that_is_not_text_is_refused_by_name() {
-        let mut file = tempfile::NamedTempFile::new().expect("temp secret file");
-        file.write_all(&[0xff, 0xfe, 0xfd]).expect("write bytes");
-        file.flush().expect("flush");
-        let mut entry = raw("peer-b");
-        entry.credential = Some(RawPeerCredential {
-            secret: None,
-            secret_file: Some(file.path().to_path_buf()),
-        });
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerSecretFileUnreadable { ref id, .. }) if id == "peer-b"
-        ));
-    }
-
-    /// A truncated file is the silent non-peering `secret = ""` would be,
-    /// so it gets the same treatment: refused at load, by name.
-    #[test]
-    fn an_empty_or_whitespace_only_secret_file_is_refused_by_name() {
-        for contents in ["", "\n", "   \t\r\n"] {
-            let (credential, _file) = secret_file(contents);
+    fn a_credential_is_refused_as_a_removed_key() {
+        for written in [
+            toml::Value::Table(toml::map::Map::new()),
+            toml::Value::String("shared-secret".to_string()),
+            toml::Value::Table({
+                let mut table = toml::map::Map::new();
+                table.insert(
+                    "secret".to_string(),
+                    toml::Value::String("shared-secret".to_string()),
+                );
+                table
+            }),
+            toml::Value::Table({
+                let mut table = toml::map::Map::new();
+                table.insert(
+                    "secret_file".to_string(),
+                    toml::Value::String("/app/data/peer.secret".to_string()),
+                );
+                table
+            }),
+        ] {
             let mut entry = raw("peer-b");
-            entry.credential = Some(credential);
+            entry.credential = Some(written.clone());
 
             assert!(
                 matches!(
                     resolve_peers(vec![entry], PeerExposure::Neither, false),
-                    Err(ConfigError::PeerSecretFileEmpty { ref id, .. }) if id == "peer-b"
+                    Err(ConfigError::PeerCredentialRemoved { ref id }) if id == "peer-b"
                 ),
-                "contents {contents:?} should be PeerSecretFileEmpty"
+                "credential = {written:?} should be refused by name"
             );
         }
-    }
-
-    /// The redaction property has to hold for the file-loaded path too --
-    /// and for the raw config value the secret passes through on its way
-    /// there, which is the other whole-value thing that gets logged.
-    #[test]
-    fn a_file_loaded_credential_never_debug_prints_its_secret() {
-        let (credential, _file) = secret_file("shared-secret");
-        let rendered_raw = format!("{credential:?}");
-        assert!(
-            !rendered_raw.contains("shared-secret"),
-            "got: {rendered_raw}"
-        );
-
-        let mut entry = raw("peer-b");
-        entry.credential = Some(credential);
-        let rendered_peer = format!("{entry:?}");
-        assert!(
-            !rendered_peer.contains("shared-secret"),
-            "got: {rendered_peer}"
-        );
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-        let rendered = format!("{:?}", peers[0]);
-
-        assert!(!rendered.contains("shared-secret"), "got: {rendered}");
-        assert!(rendered.contains("redacted"), "got: {rendered}");
-    }
-
-    /// And the literal form's raw value is redacted the same way -- the
-    /// leak this closes predates `secret_file`.
-    #[test]
-    fn a_raw_literal_credential_never_debug_prints_its_secret() {
-        let rendered = format!("{:?}", literal("shared-secret"));
-
-        assert!(!rendered.contains("shared-secret"), "got: {rendered}");
-        assert!(rendered.contains("redacted"), "got: {rendered}");
     }
 
     #[test]

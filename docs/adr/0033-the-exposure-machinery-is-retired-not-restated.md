@@ -1,6 +1,10 @@
 # The exposure machinery is retired, not restated
 
+**Status:** Accepted. **Retires the exposure machinery**: `record_inbound_delivery`, `is_over_ceiling`, `PeerConfig::ceiling` and `flush_interval_ms`. Verified in the tree — `ceiling` and `flush_interval_ms` survive only as config keys parsed to be rejected by name, and `ExposureView` / `GET /exposure` are gone. Amends [0005](0005-claims-are-truth-balances-are-a-projection.md), [0014](0014-metrics-surface-and-packet-correlated-logs.md), [0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md) and [0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md).
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
+**Falsifier:** `crates/**/*.rs` matching `\b(record_inbound_delivery|is_over_ceiling|ExposureView)\b` — the three symbols this record retired and whose absence its Status line asserts it verified in the tree. Any of them back in code means the exposure projection was restated rather than retired.
 
 ADR 0031 (issue #868/B1) retired the credit window as the peer path's operating mode — every peer
 PREPARE now carries its own covering claim, or is greeted — but explicitly left one question open:

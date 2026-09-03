@@ -21,21 +21,17 @@ use base64::Engine;
 use connector_btp::{
     decode_frame, encode_message, encode_response, encode_transfer, ProtocolData,
     ACCUMULATED_COST_HEADER, AUTH_PROTOCOL, CLAIM_ACK_HEADER, CLAIM_ACK_PROTOCOL, CLAIM_HEADER,
-    CONTENT_TYPE_TEXT, FLUSH_REQUESTED_HEADER, MINIMUM_DELIVERY_HEADER, MINIMUM_DELIVERY_PROTOCOL,
+    CONTENT_TYPE_TEXT, FLUSH_REQUESTED_HEADER,
 };
 use connector_domain::{
     derive_condition, fulfillment_matches_condition, EnvelopeError, EnvelopeRequest,
     EnvelopeResponse, Fulfill, Prepare, Reject, RejectCode,
 };
-use connector_peer_auth::{
-    encode_base64 as auth_encode_base64, encode_raw as auth_encode_raw, present_base64,
-    present_raw, PresentedCredential, SessionRole,
-};
 use connector_peer_btp::{ack, claim_json, fields, AcceptedClaims, PeerClaimDomain};
 use connector_peer_http::headers::{
     accumulated_cost as http_accumulated_cost, claim_ack as http_claim_ack, claim_ack_header_value,
     claim_header_value, claim_json as http_claim_json, flush_requested as http_flush_requested,
-    minimum_delivery as http_minimum_delivery, Headers,
+    Headers,
 };
 use connector_runtime::{
     ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, ClaimSignature, WireClaim,
@@ -54,7 +50,54 @@ use serde::Serialize;
 /// The vector-set schema version. Bump when a field's meaning changes in a
 /// way an existing SDK's replay code would misread -- a purely additive
 /// field does not require a bump.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// **2** (issue #1127): a Solana claim's `programId` acquired a meaning. It
+/// had none before -- `client-edge-spec.md` §1.3 called it decorative, this
+/// file's own `claim_solana` fixture declared the system program, and any
+/// base58 32-byte value conformed. It now MUST name the settlement program
+/// the claim's `channelAccount` lives under, the same 32 bytes ADR 0053 binds
+/// into the signed balance proof. An SDK carrying the version-1 reading of
+/// that field into a real claim builder is emitting a non-conforming claim,
+/// which is exactly what this number exists to announce -- the connector
+/// still accepts such a claim on the strength of its signature, and refusing
+/// on it waits on this adoption (§1.3, issue #1127 step 4).
+///
+/// **3** (issue #1143): minimum delivery is retired (ADR 0057). The
+/// `minimum_delivery` field is gone from both `peer_prepare` cases, the
+/// `peer_minimum_delivery_absent` and `peer_minimum_delivery_malformed`
+/// sections are deleted, and the `toon-minimum-delivery` entry and
+/// `Toon-Minimum-Delivery` header no longer ride the pinned frames -- so
+/// `peer_prepare.btp_message_hex` changed bytes. A replaying SDK that still
+/// emits the field is emitting a field no connector reads, and one that
+/// expects `R01` for an unmet floor is expecting a verdict no connector
+/// reaches -- but `R01` itself stays in the vocabulary with RFC 0027's own
+/// meaning, "the amount received by a connector in the path was too little to
+/// forward", which is what a hop answers when its fee alone exceeds the amount
+/// (ADR 0051 as corrected). Removals rather than additions, which is what this
+/// number exists to announce.
+///
+/// That correction landed without a further bump, on purpose: it moves no
+/// frame in this file. The reject vocabulary is prose in ADR 0051 rather than
+/// a pinned vector, so `schema_version` -- which guards the bytes an SDK
+/// replays -- has nothing to announce, and bumping it would spend a cross-repo
+/// signal on a file that did not change.
+///
+/// **4** (issue #1157): the `{peerId, secret}` peer credential is deleted
+/// (ADR 0060). The `peer_carriage.credential` section is gone, and with it
+/// the `btp_raw_hex` and `http_base64` bytes an SDK replayed to build a
+/// dialer's `auth` protocolData entry and its `Toon-Peer-Auth` header. Both
+/// names leave the wire together, because peer behaviour on one carriage and
+/// not the other is a defect rather than a property of the carriage
+/// (ADR 0027). A replaying SDK that still sends either is sending a field no
+/// connector reads -- harmless, since a receiver ignores an arriving header
+/// rather than refusing it, which is what lets the two ends of a peering be
+/// upgraded in either order. What the SDK must NOT infer is that its peering
+/// is thereby unauthenticated: role is now decided by the covering claim's
+/// signature against the counterparty key `[[peer_channels]]` configures,
+/// which every peer frame already carried (ADR 0042) and which is strictly
+/// stronger than the string it replaces. A removal, which is what this number
+/// exists to announce.
+pub const SCHEMA_VERSION: u32 = 4;
 
 fn seq_bytes<const N: usize>(start: u8) -> [u8; N] {
     let mut out = [0u8; N];
@@ -158,7 +201,7 @@ pub struct ClaimVectors {
 }
 
 /// A signed EIP-712 `BalanceProof` (ADR 0024, issue #575): the same struct
-/// and digest both a peer-wire claim (`ClaimBook::accept_inbound`) and a
+/// and digest both a peer claim (`ClaimBook::accept_inbound`) and a
 /// client-edge claim (`client-edge-spec.md` §1.3 step 4) are checked
 /// against -- `connector_signer::claim_signature` has exactly one such
 /// scheme, shared by both wires, so one vector section covers both.
@@ -613,23 +656,25 @@ fn generate_claim_vectors() -> (ClaimVectors, ClaimFixture) {
 // hand-rolled parallel encoder, so a vector this module emits is a vector
 // its own implementation would also accept.
 
-/// One BTP `auth` entry and its `Toon-Peer-Auth` HTTP twin, decoded back
-/// through the real carriage-facing parsers (§10.2 item 1).
-#[derive(Debug, Serialize)]
-pub struct PeerAuthCase {
-    pub name: &'static str,
-    pub peer_id: String,
-    pub secret: String,
-    pub btp_raw_hex: String,
-    pub http_base64: String,
-}
-
 /// A peer claim JSON and its two transfer encodings (§10.2 items 2, 4):
 /// raw UTF-8 on BTP, `base64` in the HTTP header -- the same JSON both
 /// ways (§4).
 #[derive(Debug, Serialize)]
 pub struct PeerClaimCase {
     pub name: &'static str,
+    /// The exact bytes this claim's signature covers, hex-encoded.
+    ///
+    /// For Solana this is [`connector_signer::solana_balance_proof_message`]'s
+    /// 96 bytes -- domain tag, settlement program id, channel account, nonce,
+    /// transferred amount (ADR 0053, issue #1082). It is the cross-repo
+    /// contract for that format, and the only thing keeping its **three**
+    /// in-tree copies in step: this crate's, `connector-settlement-solana`'s
+    /// `wire::balance_proof_message`, and the on-chain program's own
+    /// `expected_message`.
+    ///
+    /// Empty for EVM, whose signed bytes are an EIP-712 digest already
+    /// pinned by `claim_digest_hex`.
+    pub signed_message_hex: String,
     pub blockchain: &'static str,
     pub json: String,
     pub btp_raw_hex: String,
@@ -656,7 +701,6 @@ pub struct PreparePairCase {
     pub name: &'static str,
     pub prepare: PreparePacketFields,
     pub claim_json: Option<String>,
-    pub minimum_delivery: Option<u64>,
     pub btp_message_hex: String,
     pub http_headers: Vec<(String, String)>,
     pub http_body_hex: String,
@@ -732,17 +776,6 @@ pub struct PeerFlushRequestedCase {
     pub note: &'static str,
 }
 
-/// `minimumDelivery`'s absent-means-zero and malformed-is-`F01` rules
-/// (§5.1, §10.2 items 18, 19).
-#[derive(Debug, Serialize)]
-pub struct PeerMinimumDeliveryCase {
-    pub name: &'static str,
-    pub present: bool,
-    pub raw_value: Option<String>,
-    pub decoded_minimum_delivery: Option<u64>,
-    pub reject_code: Option<&'static str>,
-}
-
 /// A sealed giftwrap payload carried unchanged as a PREPARE's `data`, on
 /// both carriages (§8.1, §10.2 item 20).
 #[derive(Debug, Serialize)]
@@ -753,9 +786,13 @@ pub struct PeerForwardedDataCase {
     pub http_body_hex: String,
 }
 
+/// There is no `credential` entry, and there was one: a `{peerId, secret}`
+/// in a BTP `auth` entry and a `Toon-Peer-Auth` header, pinned as §10.2's
+/// item 1. ADR 0060 deleted the credential from both carriages, so there is
+/// no encoding left to pin -- a replayer that still has the old vector will
+/// find nothing to compare it against, which is the point.
 #[derive(Debug, Serialize)]
 pub struct PeerCarriageVectors {
-    pub credential: PeerAuthCase,
     pub claim_evm: PeerClaimCase,
     /// §10.2 item 3: pinned equal to [`ClaimCase::digest_hex`] of this same
     /// run's `claim` section -- demonstrating ADR 0024's digest is
@@ -775,8 +812,6 @@ pub struct PeerCarriageVectors {
     pub claim_retransmit: PeerRetransmitCase,
     pub claim_same_nonce_different_bytes: PeerRetransmitCase,
     pub flush_requested: PeerFlushRequestedCase,
-    pub minimum_delivery_absent: PeerMinimumDeliveryCase,
-    pub minimum_delivery_malformed: PeerMinimumDeliveryCase,
     pub forwarded_data_unchanged: PeerForwardedDataCase,
 }
 
@@ -796,35 +831,6 @@ fn prepare_fields(prepare: &Prepare) -> PreparePacketFields {
         execution_condition_hex: hex_of(&prepare.execution_condition),
         destination: prepare.destination.clone(),
         data_hex: hex_of(&prepare.data),
-    }
-}
-
-fn generate_peer_auth_case() -> PeerAuthCase {
-    let credential = PresentedCredential::new("store-box", "s3cret-peering-key");
-    let raw = auth_encode_raw(&credential);
-    let based = auth_encode_base64(&credential);
-
-    // I1: both encodings decode to the same asserted identity and prove
-    // the same configured secret, through the real carriage-facing
-    // decoders -- not a hand round trip of `encode`/`decode` alone.
-    let from_raw = present_raw(std::iter::once(raw.as_slice()))
-        .expect("one credential is never ambiguous")
-        .expect("a credential was presented");
-    let from_base64 = present_base64(std::iter::once(based.as_bytes()))
-        .expect("one credential is never ambiguous")
-        .expect("a credential was presented");
-    let configured = connector_config::PeerCredential::new("s3cret-peering-key");
-    assert_eq!(from_raw.asserted_peer_id(), "store-box");
-    assert_eq!(from_base64.asserted_peer_id(), "store-box");
-    assert!(from_raw.proves(&configured));
-    assert!(from_base64.proves(&configured));
-
-    PeerAuthCase {
-        name: "peer_auth",
-        peer_id: "store-box".to_string(),
-        secret: "s3cret-peering-key".to_string(),
-        btp_raw_hex: hex_of(&raw),
-        http_base64: based,
     }
 }
 
@@ -870,6 +876,7 @@ fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
 
     PeerClaimCase {
         name: "peer_claim_evm",
+        signed_message_hex: String::new(),
         blockchain: "evm",
         json,
         btp_raw_hex: hex_of(&raw_entry.data),
@@ -881,7 +888,35 @@ fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
     }
 }
 
-/// §10.2 item 4: marked **aspirational**, exactly as `peer-wire-spec.md`
+/// Decode a base58 32-byte fixture, panicking on a bad literal -- these are
+/// hardcoded in this file, so a failure here is a typo, not input.
+fn bs58_32(value: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let decoded = bs58::decode(value).into_vec().expect("a base58 fixture");
+    assert_eq!(decoded.len(), 32, "fixture is not 32 bytes: {value}");
+    out.copy_from_slice(&decoded);
+    out
+}
+
+/// The settlement program the `claim_solana` fixture's channel lives under.
+///
+/// This is the deployed public-devnet payment-channel program
+/// (`packages/solana-program/deployments/devnet-public.md`) -- an example
+/// settlement program, not the only one a channel can live under, exactly as
+/// `generate_claim_vectors`'s `chain_id` is Base Sepolia's real id rather than
+/// a made-up one. A claim fixture's *domain* half carries a real deployment's
+/// value for that reason; its account and key halves stay fixture bytes.
+///
+/// It deliberately replaces the system program
+/// (`11111111111111111111111111111111`) this fixture carried until issue
+/// #1127. A Solana claim's `programId` MUST name the settlement program its
+/// `channelAccount` lives under (`client-edge-spec.md` §1.3) -- the same 32
+/// bytes ADR 0053 binds into the signed balance proof at offset 16 -- and a
+/// normative fixture declaring the system program taught every payer reading
+/// it that any value would do.
+const SOLANA_SETTLEMENT_PROGRAM_ID: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
+
+/// §10.2 item 4: marked **aspirational**, exactly as `peer-semantics-pre-868.md`
 /// §3.5 marks the Solana claim row -- pinning the shape before an emitting
 /// implementation exists on this connector (outbound peer claims are
 /// EVM-only, `claim_json::encode`'s own doc). What *does* exist and is
@@ -889,6 +924,7 @@ fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
 /// already accepts a Solana claim (issue #732).
 fn generate_peer_claim_solana_case() -> PeerClaimCase {
     let channel_account = "GDDMwNyyx8uB6zrqwBFHjLLG3TBYk2F1Mh6usnNPUsqk";
+    let program_id = SOLANA_SETTLEMENT_PROGRAM_ID;
     let signer_public_key = "11111111111111111111111111111113";
     let signature_bytes = seq_bytes::<64>(0xe1);
     let json = serde_json::json!({
@@ -897,7 +933,11 @@ fn generate_peer_claim_solana_case() -> PeerClaimCase {
         "messageId": "vector-fixture:solana:1",
         "timestamp": "2030-01-01T00:00:00.000Z",
         "senderId": signer_public_key,
-        "programId": "11111111111111111111111111111111",
+        // One literal, read twice: the declared label here and the signed
+        // domain at offset 16 of `signed_message_hex` below are the same
+        // `program_id`, so this fixture cannot drift into declaring one
+        // program while signing under another (issue #1127).
+        "programId": program_id,
         "channelAccount": channel_account,
         "nonce": 1,
         "transferredAmount": "250000",
@@ -930,6 +970,12 @@ fn generate_peer_claim_solana_case() -> PeerClaimCase {
 
     PeerClaimCase {
         name: "peer_claim_solana",
+        signed_message_hex: hex_of(&connector_signer::solana_balance_proof_message(
+            &bs58_32(program_id),
+            &bs58_32(channel_account),
+            1,
+            250_000,
+        )),
         blockchain: "solana",
         json,
         btp_raw_hex: hex_of(&raw_entry.data),
@@ -955,48 +1001,30 @@ fn generate_prepare_pair_cases(evm_claim: &PeerClaimCase) -> (PreparePairCase, P
         prepare
     );
 
-    let minimum_delivery: u64 = 100_000;
-    let md_entry =
-        fields::minimum_delivery_protocol_data(minimum_delivery).expect("a non-zero floor rides");
     let claim_entry = claim_json::protocol_data(&evm_claim.json);
-    let role = SessionRole::peer("store-box");
 
-    // Item 5: claim + minimum-delivery, both riding one PREPARE.
-    let btp_with_claim = encode_message(
-        9_001,
-        &[claim_entry.clone(), md_entry.clone()],
-        &prepare_bytes,
-    );
+    // Item 5: a claim riding one PREPARE.
+    let btp_with_claim = encode_message(9_001, &[claim_entry], &prepare_bytes);
     let decoded = decode_frame(&btp_with_claim).expect("self-generated frame decodes");
     assert_eq!(decoded.ilp_packet, prepare_bytes);
     assert_eq!(
         claim_json::from_protocol_data(&decoded.protocol_data),
         Some(evm_claim.json.as_bytes())
     );
-    assert_eq!(
-        fields::minimum_delivery(&role, &decoded.protocol_data),
-        Ok(minimum_delivery)
-    );
 
     let mut headers_with_claim = Headers::new();
     headers_with_claim.push(CLAIM_HEADER, claim_header_value(&evm_claim.json));
-    headers_with_claim.push(MINIMUM_DELIVERY_HEADER, minimum_delivery.to_string());
     assert_eq!(
         http_claim_json(&headers_with_claim)
             .expect("a claim rode")
             .expect("valid base64"),
         evm_claim.json.as_bytes()
     );
-    assert_eq!(
-        http_minimum_delivery(&role, &headers_with_claim),
-        Ok(minimum_delivery)
-    );
 
     let with_claim = PreparePairCase {
         name: "peer_prepare",
         prepare: prepare_fields(&prepare),
         claim_json: Some(evm_claim.json.clone()),
-        minimum_delivery: Some(minimum_delivery),
         btp_message_hex: hex_of(&btp_with_claim),
         http_headers: headers_pairs(&headers_with_claim),
         http_body_hex: hex_of(&prepare_bytes),
@@ -1004,19 +1032,17 @@ fn generate_prepare_pair_cases(evm_claim: &PeerClaimCase) -> (PreparePairCase, P
 
     // Item 6: the same PREPARE with no claim entry/header -- "claimless is
     // legal" pinned rather than assumed.
-    let btp_no_claim = encode_message(9_002, &[md_entry], &prepare_bytes);
+    let btp_no_claim = encode_message(9_002, &[], &prepare_bytes);
     let decoded_no_claim = decode_frame(&btp_no_claim).expect("self-generated frame decodes");
     assert!(claim_json::from_protocol_data(&decoded_no_claim.protocol_data).is_none());
 
-    let mut headers_no_claim = Headers::new();
-    headers_no_claim.push(MINIMUM_DELIVERY_HEADER, minimum_delivery.to_string());
+    let headers_no_claim = Headers::new();
     assert!(http_claim_json(&headers_no_claim).is_none());
 
     let without_claim = PreparePairCase {
         name: "peer_prepare_no_claim",
         prepare: prepare_fields(&prepare),
         claim_json: None,
-        minimum_delivery: Some(minimum_delivery),
         btp_message_hex: hex_of(&btp_no_claim),
         http_headers: headers_pairs(&headers_no_claim),
         http_body_hex: hex_of(&prepare_bytes),
@@ -1397,7 +1423,7 @@ fn generate_retransmit_cases() -> (PeerRetransmitCase, PeerRetransmitCase) {
 
     let mut counterparties = HashMap::new();
     counterparties.insert(first.channel_id.clone(), signer_address);
-    let mut book = ClaimBook::new(None, HashMap::new(), counterparties);
+    let book = ClaimBook::new(None, HashMap::new(), counterparties);
     book.set_channel_domain(
         &first.channel_id,
         ChannelDomain {
@@ -1439,45 +1465,6 @@ fn generate_flush_requested_case() -> PeerFlushRequestedCase {
     }
 }
 
-fn generate_minimum_delivery_cases() -> (PeerMinimumDeliveryCase, PeerMinimumDeliveryCase) {
-    let role = SessionRole::peer("store-box");
-
-    assert_eq!(fields::minimum_delivery(&role, &[]), Ok(0));
-    assert_eq!(http_minimum_delivery(&role, &Headers::new()), Ok(0));
-    let absent = PeerMinimumDeliveryCase {
-        name: "peer_minimum_delivery_absent",
-        present: false,
-        raw_value: None,
-        decoded_minimum_delivery: Some(0),
-        reject_code: None,
-    };
-
-    let malformed_value = "twelve";
-    let entry = ProtocolData {
-        name: MINIMUM_DELIVERY_PROTOCOL.to_string(),
-        content_type: CONTENT_TYPE_TEXT,
-        data: malformed_value.as_bytes().to_vec(),
-    };
-    let error = fields::minimum_delivery(&role, &[entry])
-        .expect_err("a malformed value is refused, never silently zero");
-    let reject = fields::malformed_minimum_delivery_reject(&error);
-    assert_eq!(reject.code.as_str(), "F01");
-
-    let mut headers = Headers::new();
-    headers.push(MINIMUM_DELIVERY_HEADER, malformed_value);
-    assert!(http_minimum_delivery(&role, &headers).is_err());
-
-    let malformed = PeerMinimumDeliveryCase {
-        name: "peer_minimum_delivery_malformed",
-        present: true,
-        raw_value: Some(malformed_value.to_string()),
-        decoded_minimum_delivery: None,
-        reject_code: Some("F01"),
-    };
-
-    (absent, malformed)
-}
-
 fn generate_forwarded_data_case(giftwrap: &GiftwrapVectors) -> PeerForwardedDataCase {
     let sealed = hex::decode(&giftwrap.cases[0].request_wrap_hex)
         .expect("hex from this run's own giftwrap section");
@@ -1511,7 +1498,6 @@ fn generate_peer_carriage_vectors(
     claim_fixture: &ClaimFixture,
     giftwrap: &GiftwrapVectors,
 ) -> PeerCarriageVectors {
-    let credential = generate_peer_auth_case();
     let claim_evm = generate_peer_claim_evm_case(claim_fixture);
     let claim_solana = generate_peer_claim_solana_case();
     let (prepare, prepare_no_claim) = generate_prepare_pair_cases(&claim_evm);
@@ -1527,12 +1513,10 @@ fn generate_peer_carriage_vectors(
     let flush = generate_flush_case(&claim_evm);
     let (claim_retransmit, claim_same_nonce_different_bytes) = generate_retransmit_cases();
     let flush_requested = generate_flush_requested_case();
-    let (minimum_delivery_absent, minimum_delivery_malformed) = generate_minimum_delivery_cases();
     let forwarded_data_unchanged = generate_forwarded_data_case(giftwrap);
 
     PeerCarriageVectors {
         claim_digest_hex: claim_fixture.digest_hex.clone(),
-        credential,
         claim_evm,
         claim_solana,
         prepare,
@@ -1548,8 +1532,6 @@ fn generate_peer_carriage_vectors(
         claim_retransmit,
         claim_same_nonce_different_bytes,
         flush_requested,
-        minimum_delivery_absent,
-        minimum_delivery_malformed,
         forwarded_data_unchanged,
     }
 }

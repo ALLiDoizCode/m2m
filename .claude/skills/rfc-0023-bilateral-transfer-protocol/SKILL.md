@@ -1,36 +1,40 @@
 ---
 name: rfc-0023-bilateral-transfer-protocol
-description: Expert knowledge of Interledger RFC 0023 - Bilateral Transfer Protocol. Use when users ask about bilateral transfers, peer-to-peer payments, direct settlement, or two-party payment protocols. Triggers on 'bilateral transfer', 'peer-to-peer payment', 'direct settlement', or bilateral relationship questions.
+description: Expert knowledge of Interledger RFC 0023 - Bilateral Transfer Protocol. Use when users ask about bilateral transfers, peer-to-peer payments, direct settlement, or two-party payment protocols. Answers from the copy vendored in this repository at docs/rfcs/, which carries a TOON profile saying where this connector departs. Triggers on 'bilateral transfer', 'peer-to-peer payment', 'direct settlement', or bilateral relationship questions.
 ---
 
-# RFC 0023: Bilateral Transfer Protocol
+# RFC 0023: Bilateral Transfer Protocol (BTP 2.0)
 
-## Overview
+**Read [`docs/rfcs/0023-bilateral-transfer-protocol/0023-bilateral-transfer-protocol.md`](../../../docs/rfcs/0023-bilateral-transfer-protocol/0023-bilateral-transfer-protocol.md).**
+It is the upstream RFC, unmodified, beneath a **TOON profile** written by this
+project. Answer from that file rather than from memory or from the network.
 
-Provides expert guidance on bilateral transfer protocols for direct peer-to-peer payments and settlement.
+It gives you the BTP frames a `wss://` peering and a client session speak.
 
-## Core Capabilities
+## How to read it
 
-### 1. RFC Documentation Search
-Access RFC specification details using the MCP tool:
+1. **The TOON profile, at the top.** Every place this connector departs from the
+   RFC, each citing the ADR or `docs/protocol/` rule that governs it. A ⚠ marks
+   a departure that is easy to assume away — one a reader of the RFC would not
+   expect and would be wrong to guess at. Some are recorded and guarded, some are
+   open gaps; the bullet itself says which. Surface it plainly when it is
+   relevant, rather than reading the glyph as "unrecorded".
+2. **The body, below the `<!-- BEGIN VERBATIM UPSTREAM BODY -->` marker.** The
+   standard as written. It is never edited to match this connector
+   ([ADR 0062](../../../docs/adr/0062-an-rfc-is-vendored-verbatim-and-profiled-never-forked.md)),
+   and a test enforces that.
+
+## Precedence when they disagree
+
 ```
-mcp__interledger_org-v4_Docs__search_rfcs_documentation
+vectors  >  ADRs  >  docs/protocol/ specs  >  the TOON profile  >  the RFC body
 ```
 
-Search with queries like:
-- "bilateral transfer protocol"
-- "peer-to-peer payments"
-- "direct settlement"
+The RFC body never overrides anything local — it is what the local rules are
+stated against. If the question is "what does this connector do", the ADR wins.
+If the question is "what does Interledger specify", the body wins. Distinguish
+the two in your answer; they are often not the same, and this file exists
+because that surprised somebody.
 
-### 2. Answer Questions
-Provide detailed explanations based on the RFC specification.
-
-### 3. Implementation Guidance
-Help users implement and integrate the protocol or feature.
-
-## Common Topics
-- Bilateral transfer mechanisms
-- Peer-to-peer payment protocols
-- Transfer authorization
-- Settlement between peers
-- Bilateral relationship management
+Never edit the body. A correction to how TOON aligns goes **above** the marker,
+or into the record that owns the rule.

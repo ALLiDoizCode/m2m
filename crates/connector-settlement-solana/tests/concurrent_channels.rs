@@ -38,8 +38,23 @@ async fn every_channel_operation_is_a_real_confirmed_transaction() {
         .open(counterparty, Duration::seconds(0))
         .await
         .expect("open");
+    // `fund` is a self-deposit (issue #1118): a real `Deposit` signed by
+    // this backend's own identity, crediting its own side.
     let state = backend.fund(&channel, 1_000).await.expect("fund");
-    assert_eq!(state.deposited, 1_000);
+    assert_eq!(state.own_deposited, 1_000);
+    assert_eq!(state.counterparty_deposited, 0);
+
+    // The claim redeemed below is drawn from the *counterparty's* side, so
+    // the counterparty has to have deposited there -- which on this chain
+    // only they can do, since `Deposit` credits by signer. Here that is a
+    // key `deploy()` privately holds; on a real cluster it is the payer's
+    // own wallet.
+    let state = backend
+        .test_fund_counterparty(&channel, 1_000)
+        .await
+        .expect("the counterparty deposits on their own side");
+    assert_eq!(state.counterparty_deposited, 1_000);
+    assert_eq!(state.own_deposited, 1_000);
 
     let claim_signature = backend
         .test_sign_claim(&channel, 1, 400)
@@ -131,7 +146,12 @@ async fn concurrent_calls_from_the_same_backend_do_not_conflict() {
         .channel_state(&channel)
         .await
         .expect("channel_state");
-    assert_eq!(state.deposited, 333);
+    assert_eq!(state.own_deposited, 333);
+
+    backend
+        .test_fund_counterparty(&channel, 333)
+        .await
+        .expect("the counterparty deposits what the claims below draw on");
 
     let sig_a = backend
         .test_sign_claim(&channel, 1, 100)

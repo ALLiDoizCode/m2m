@@ -6,30 +6,27 @@
   "workspaces": [
     "packages/announcer",
     "packages/faucet",
-    "packages/mina-usdc-faucet-web",
-    "packages/mina-zkapp",
     "tools/fund-peers"
   ],
   "scripts": {
-    "build": "npm run build --workspace=packages/mina-zkapp && npm run build --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "test:watch": "npm run test:watch --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
-    "typecheck": "npm run build --workspace=packages/mina-zkapp && npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
     "sandcastle": "npx tsx .sandcastle/main.ts",
     "sandcastle:plan": "npx tsx .sandcastle/plan-dry-run.ts",
     "sandcastle:implement": "npx tsx .sandcastle/agent-implement-issue.ts",
+    "sandcastle:fix": "npx tsx .sandcastle/agent-fix-pr.ts",
     "sandcastle:review": "npx tsx .sandcastle/agent-review-pr.ts",
-    "publish:mina-zkapp": "npm run build --workspace=packages/mina-zkapp && npm publish --workspace=packages/mina-zkapp --access public",
     "prepare": "husky",
     "postinstall": "patch-package"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "0.12.0",
-    "@babel/preset-env": "^7.28.6",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
     "eslint": "^8.56.0",

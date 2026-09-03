@@ -81,17 +81,20 @@ one.
   correlation id through call signatures. The same span carries `client_channel_id` whenever a
   client claim admitted the packet, joinable to `state_dir/client-edge-claims.log`'s
   `InboundClaimAccepted` entries and the channel's `[[client_channels]]`/chain-resolved record
-  ([ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)) — payer
-  attribution lives in the connector's own records and is never handed to the app, per the bullet
-  below.
+  ([ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)) — the same
+  channel key the delivery's own `X-TOON-Payer` carries, per the bullet below.
 - **Never log a private key, a mnemonic, a bearer token or a decrypted payload.** A gift wrap's
   failure to open is reported by kind, never by content.
-- **A terminating connector tells the app nothing about the payment that brought a packet to it**
-  ([ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)): not who paid,
-  not how much, not on what chain. Do not add a header, query parameter or envelope field carrying
-  any of the three — `amount` is implied by the handler that fired (ADR 0020), `chain` has no
-  honest source, and `payer` is a connector-side fact (`client_channel_id`, above), never handed
-  downstream.
+- **A terminating connector tells the app about a payment it verified itself, and about no other**
+  ([ADR 0040](../adr/0040-a-verified-payment-is-stated-to-the-app.md), superseding ADR 0036's
+  conclusion). The delivery to a route's `handler_url` carries `X-TOON-Payer` (the admitted client
+  channel key), `X-TOON-Amount` (the route's own flat price) and `X-TOON-Chain` (that key's
+  namespace) — and carries none of them when no client claim admitted the packet or the route is
+  free. Do not source any of the three from anywhere else: not the previous hop, not the
+  destination address, not the packet's own `amount` field, and never a sentinel in place of an
+  absent value. All three live in `crates/connector-runtime/src/attribution.rs`; a caller's
+  spelling of those names is stripped there on every delivery, so add a name to that list or do
+  not add it at all.
 
 ## Documentation
 

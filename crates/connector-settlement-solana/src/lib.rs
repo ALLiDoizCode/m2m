@@ -37,6 +37,8 @@ use chrono::Duration;
 
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::genesis_config::ClusterType;
+use solana_sdk::hash::Hash;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
@@ -64,34 +66,82 @@ pub struct SolanaSettlementBackend {
     token_mint: Pubkey,
     /// Present only for a [`deploy`](Self::deploy)-built backend:
     /// counterparty identities this backend privately holds keys for, so
-    /// this crate's own tests can drive a full open/fund/redeem/close/settle
-    /// lifecycle without a second, external actor. Two of them, because the
-    /// deployed program holds exactly one live channel per (pair, mint) --
-    /// its channel PDA is seeded `["channel", min, max, mint]` -- so a test
-    /// needing two concurrently-live, *fundable* channels (the port's
-    /// contract suite does: `counterparty`'s channel is still in its
-    /// challenge window when `instant_counterparty`'s opens) needs two
-    /// distinct counterparty identities with real keys.
+    /// this crate's own tests can stand in for the external actor that
+    /// would really deposit on the counterparty's side --
+    /// [`test_fund_counterparty`](Self::test_fund_counterparty) -- and
+    /// sign the claims this backend then redeems
+    /// ([`test_sign_claim`](Self::test_sign_claim)). Two of them, because
+    /// the deployed program holds exactly one live channel per (pair,
+    /// mint) -- its channel PDA is seeded `["channel", min, max, mint]` --
+    /// so a test needing two concurrently-live channels with real
+    /// counterparty collateral needs two distinct identities with real
+    /// keys.
     ///
-    /// This is not a shortcut around a real constraint -- it is the
-    /// answer to one. `packages/solana-program`'s `Deposit` instruction
-    /// requires the depositing participant to sign for *themselves*
-    /// (`processor.rs:309-311`, `:356-360`): unlike
-    /// `TokenNetwork.setTotalDeposit`, which lets any caller credit an
-    /// arbitrary participant's deposit from the caller's own token
-    /// balance (`EvmSettlementBackend::fund`'s "approve-then-deposit"),
-    /// there is no delegate-deposit path here. A `connect`-built
-    /// production backend never has any: real deposits happen from the
-    /// counterparty's own wallet directly against the deployed program
-    /// (rig opens and funds its own channel), never through this
-    /// backend's [`fund`](SettlementBackend::fund) -- see that method's
-    /// own doc for what it does without one.
+    /// `packages/solana-program`'s `Deposit` instruction requires the
+    /// depositing participant to sign for *themselves*
+    /// (`processor.rs:309-311`, `:356-360`): there is no delegate-deposit
+    /// path here, unlike `TokenNetwork.setTotalDeposit`, which lets any
+    /// caller credit an arbitrary participant from the caller's own token
+    /// balance. A `connect`-built production backend holds no such key and
+    /// needs none: [`fund`](SettlementBackend::fund) is a *self*-deposit
+    /// on both chains as of issue #1118, and the counterparty's own
+    /// deposit is the counterparty's own transaction. The port's contract
+    /// suite runs against a `connect`-built backend for exactly that
+    /// reason (`tests/contract_suite.rs`) -- these keys are a convenience
+    /// for this crate's other tests, not the thing that makes `fund`
+    /// work.
     counterparty_signers: Vec<Keypair>,
     /// Channel PDAs this backend has itself driven
     /// [`settle`](SettlementBackend::settle) to completion on -- see this
     /// struct's own top-of-file doc for why the chain alone cannot answer
     /// "was this settled, or did it never exist" once that has happened.
     settled: Mutex<HashSet<Pubkey>>,
+    /// Which Solana cluster the endpoint this backend connected to is
+    /// actually on, read from the chain itself at
+    /// [`connect`](Self::connect) -- see [`Self::cluster`] and
+    /// [`cluster_for_genesis_hash`] (issue #1131).
+    cluster: Option<&'static str>,
+}
+
+/// The public Solana cluster whose genesis block hashes to `genesis_hash`
+/// -- `"mainnet-beta"`, `"devnet"` or `"testnet"` -- and `None` for a chain
+/// that is none of the three (issue #1131).
+///
+/// A cluster's genesis hash is the one identity a Solana chain states about
+/// itself. It is not a naming convention, so it holds however the node
+/// reached the chain: `api.devnet.solana.com`, a Helius or Triton URL, an
+/// SSH tunnel, a caching proxy, an IP literal. That is the whole reason this
+/// exists next to `SolanaSettlementConfig::cluster_hint`, which can only
+/// recognise a hostname it was told about in advance and answers `None` for
+/// every paid RPC provider.
+///
+/// The three hashes are **not** written down here. They come from
+/// [`ClusterType::get_genesis_hash`], `solana-sdk`'s own table, so the
+/// values track the pinned SDK rather than this repository's memory of
+/// them; `cluster_names_match_the_published_genesis_hashes` in this
+/// module's tests pins that table to the base58 the public RPC endpoints
+/// answer with, so an SDK bump that moved a value would fail the gate
+/// rather than silently relabel a chain.
+///
+/// # `None` is a chain this connector cannot name, not an error
+///
+/// `ClusterType::Development` -- a `solana-test-validator`, which mints a
+/// fresh genesis on every run, and therefore every `local/` topology and
+/// every tier-3 test in this workspace -- has no published hash and can
+/// never have one. It answers `None`, which is exactly what `cluster_hint`
+/// already answers for an unrecognised host, and means the same thing: this
+/// node cannot say which cluster it is on, so it compares nothing rather
+/// than guessing. Refusing here would refuse to boot on every local
+/// topology.
+pub fn cluster_for_genesis_hash(genesis_hash: &Hash) -> Option<&'static str> {
+    [
+        (ClusterType::MainnetBeta, "mainnet-beta"),
+        (ClusterType::Devnet, "devnet"),
+        (ClusterType::Testnet, "testnet"),
+    ]
+    .into_iter()
+    .find(|(cluster, _)| cluster.get_genesis_hash().as_ref() == Some(genesis_hash))
+    .map(|(_, name)| name)
 }
 
 impl SolanaSettlementBackend {
@@ -122,6 +172,13 @@ impl SolanaSettlementBackend {
     /// refuses, naming both values, when they disagree (issue #630, ADR
     /// 0009): the fuller "does the fleet's own identity match what's
     /// deployed" check issue #567 deferred here.
+    ///
+    /// It also asks the endpoint which chain it is on
+    /// ([`Self::cluster`], issue #1131) -- one `getGenesisHash` read
+    /// beside the identity reads already here. Unlike them it never
+    /// refuses: a chain this connector cannot name is recorded as
+    /// unnamed, never rejected, because `solana-test-validator` is
+    /// unnameable by construction and every `local/` topology runs on one.
     pub async fn connect(
         rpc_url: &str,
         payer_seed: &[u8; 32],
@@ -155,6 +212,18 @@ impl SolanaSettlementBackend {
             )));
         }
 
+        // The chain's own answer to "which cluster am I", read once here
+        // rather than guessed from `rpc_url` forever after (issue #1131).
+        // Ordered with the other identity reads and, like them, a failed
+        // read refuses the connection -- which costs nothing this
+        // `connect` did not already cost, since the three reads above have
+        // already failed by now if the endpoint is unreachable.
+        let cluster = cluster_for_genesis_hash(&rpc.get_genesis_hash().await.map_err(|error| {
+            SettlementError::Backend(format!(
+                "could not read the cluster's genesis hash: {error}"
+            ))
+        })?);
+
         let backend = Self {
             rpc,
             program_id,
@@ -162,6 +231,7 @@ impl SolanaSettlementBackend {
             token_mint,
             counterparty_signers: Vec::new(),
             settled: Mutex::new(HashSet::new()),
+            cluster,
         };
         // Ordered after `ensure_own_ata_exists`, which already proves the
         // payer holds real lamports by submitting a transaction -- so a
@@ -300,6 +370,11 @@ impl SolanaSettlementBackend {
             token_mint: mint.pubkey(),
             counterparty_signers: counterparties.into(),
             settled: Mutex::new(HashSet::new()),
+            // A `deploy`-built backend only ever runs against this
+            // workspace's own `solana-test-validator`, whose fresh genesis
+            // no published hash can match -- so the read is skipped rather
+            // than spent to learn `None` (issue #1131).
+            cluster: None,
         };
         backend.ensure_own_ata_exists().await?;
         backend
@@ -311,20 +386,28 @@ impl SolanaSettlementBackend {
             .map(|keypair| keypair.pubkey())
             .collect();
         for counterparty_pubkey in counterparty_pubkeys {
-            let create_counterparty_ata =
-                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
-                    &backend.payer.pubkey(),
-                    &counterparty_pubkey,
-                    &backend.token_mint,
-                    &spl_token::id(),
-                );
-            backend.submit(&[create_counterparty_ata], &[]).await?;
             backend
-                .mint_test_tokens_to(&counterparty_pubkey, 1_000_000_000)
+                .test_mint_tokens_to(&counterparty_pubkey, 1_000_000_000)
                 .await?;
         }
 
         Ok(backend)
+    }
+
+    /// Which Solana cluster this backend is settling on, as the chain
+    /// itself stated at [`connect`](Self::connect) -- and `None` for a
+    /// chain none of the three public clusters' genesis hashes match, which
+    /// is every `solana-test-validator` (issue #1131,
+    /// [`cluster_for_genesis_hash`]).
+    ///
+    /// This is the authoritative answer to a question
+    /// `SolanaSettlementConfig::cluster_hint` can only guess at from the
+    /// configured URL's hostname, and it is what a Solana claim's
+    /// self-declared `cluster` is compared against (issue #975): a node
+    /// behind a paid RPC provider gets a real cluster here where the hint
+    /// gets nothing.
+    pub fn cluster(&self) -> Option<&'static str> {
+        self.cluster
     }
 
     /// This backend's own signing address -- the on-chain identity every
@@ -504,8 +587,95 @@ impl SolanaSettlementBackend {
             .0 == pubkey
         })?;
         let units = to_units(cumulative_amount).ok()?;
-        let message = wire::balance_proof_message(&pubkey, nonce, units);
+        let message = wire::balance_proof_message(&self.program_id, &pubkey, nonce, units);
         Some(counterparty.sign_message(&message).as_ref().to_vec())
+    }
+
+    /// Test/dev-only (issue #1118): mint `amount` of this backend's mock
+    /// mint into `owner`'s associated token account, creating that account
+    /// first if it does not exist. Only a [`deploy`](Self::deploy)-built
+    /// backend is the mint's authority, so only one of those can do this.
+    ///
+    /// The token faucet a test needs once `fund` is a *self*-deposit: a
+    /// [`connect`](Self::connect)-built backend spends its **own** tokens
+    /// to collateralise a channel, so a test standing one up has to put
+    /// real tokens in its ATA first -- exactly as a real deployment has to
+    /// (see `local/keys.sh`, which mints mock USDC to each node's EVM
+    /// settlement address and, as of issue #1118, must do the same for its
+    /// Solana one).
+    pub async fn test_mint_tokens_to(
+        &self,
+        owner: &Pubkey,
+        amount: u64,
+    ) -> Result<(), SettlementError> {
+        let create_ata =
+            spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                &self.payer.pubkey(),
+                owner,
+                &self.token_mint,
+                &spl_token::id(),
+            );
+        self.submit(&[create_ata], &[]).await?;
+        self.mint_test_tokens_to(owner, amount).await
+    }
+
+    /// Test/dev-only (issue #1118): deposit `amount` on the
+    /// **counterparty's** own side of `channel`, signed by whichever held
+    /// counterparty identity is that channel's participant -- the external
+    /// actor a real deployment supplies and this crate's own tests must
+    /// stand in for. What this crate wires
+    /// `connector_settlement::contract::ContractFixture::fund_counterparty`
+    /// to for a [`deploy`](Self::deploy)-built backend.
+    ///
+    /// This is the one deposit the deployed program will not let a node
+    /// make for somebody else: `Deposit` credits by signer
+    /// (`processor.rs:356-360`), so this works only because
+    /// [`deploy`](Self::deploy) privately holds the counterparty's key. It
+    /// is emphatically not a production path -- `fund` is the self-deposit
+    /// every real node uses.
+    ///
+    /// [`SettlementError::Backend`] on a [`connect`](Self::connect)-built
+    /// backend, which holds no such key.
+    pub async fn test_fund_counterparty(
+        &self,
+        channel: &ChannelId,
+        amount: u128,
+    ) -> Result<ChannelState, SettlementError> {
+        let (pubkey, account) = self.open_channel(channel).await?;
+        let Some(counterparty_signer) = self.counterparty_signers.iter().find(|keypair| {
+            let counterparty_pubkey = keypair.pubkey();
+            account.participant_a == counterparty_pubkey
+                || account.participant_b == counterparty_pubkey
+        }) else {
+            return Err(SettlementError::Backend(
+                "none of this backend's held counterparty keys is a participant of this channel \
+                 -- only a deploy()-built backend holds any, and depositing on a counterparty's \
+                 behalf is a test fixture's job, never a node's"
+                    .to_string(),
+            ));
+        };
+        let counterparty_pubkey = counterparty_signer.pubkey();
+        let units = to_units(amount)?;
+        let depositor_token_account = spl_associated_token_account::get_associated_token_address(
+            &counterparty_pubkey,
+            &self.token_mint,
+        );
+        let (vault, _bump) = wire::vault_pda(&pubkey, &self.program_id);
+
+        let instruction = Instruction::new_with_bytes(
+            self.program_id,
+            &wire::pack_deposit(units),
+            wire::Accounts::deposit(
+                &counterparty_pubkey,
+                &depositor_token_account,
+                &vault,
+                &pubkey,
+            ),
+        );
+        self.submit(&[instruction], &[counterparty_signer]).await?;
+
+        let (_pubkey, account) = self.open_channel(channel).await?;
+        self.to_channel_state(channel, &account)
     }
 
     async fn ensure_own_ata_exists(&self) -> Result<(), SettlementError> {
@@ -689,29 +859,36 @@ impl SolanaSettlementBackend {
     }
 
     /// Derive a single [`ChannelState`] from `account`'s two-sided shape
-    /// (mirrors `EvmSettlementBackend::read_state`'s own doc): `deposited`
-    /// and `redeemed` are the counterparty's own `deposit_x` and
-    /// `transferred_amount_x` -- what a claim signed by the counterparty
-    /// is bounded against on chain (`processor.rs:770-789`), and what
-    /// `redeem` actually advances (`processor.rs:800-807`).
+    /// (mirrors `EvmSettlementBackend::read_state`'s own doc):
+    /// `counterparty_deposited` and `redeemed` are the counterparty's own
+    /// `deposit_x` and `transferred_amount_x` -- what a claim signed by
+    /// the counterparty is bounded against on chain
+    /// (`processor.rs:770-789`), and what `redeem` actually advances
+    /// (`processor.rs:800-807`) -- while `own_deposited` is this backend's
+    /// own side of the same pair (issue #1118), what
+    /// [`fund`](SettlementBackend::fund) raises and what `SettleChannel`
+    /// eventually pays back out.
     fn to_channel_state(
         &self,
         channel: &ChannelId,
         account: &wire::ChannelAccount,
     ) -> Result<ChannelState, SettlementError> {
-        let (counterparty, deposited, redeemed) = if self.own_is_participant_a(account)? {
-            (
-                account.participant_b,
-                account.deposit_b,
-                account.transferred_amount_b,
-            )
-        } else {
-            (
-                account.participant_a,
-                account.deposit_a,
-                account.transferred_amount_a,
-            )
-        };
+        let (counterparty, deposited, own_deposited, redeemed) =
+            if self.own_is_participant_a(account)? {
+                (
+                    account.participant_b,
+                    account.deposit_b,
+                    account.deposit_a,
+                    account.transferred_amount_b,
+                )
+            } else {
+                (
+                    account.participant_a,
+                    account.deposit_a,
+                    account.deposit_b,
+                    account.transferred_amount_a,
+                )
+            };
         Ok(ChannelState {
             id: channel.clone(),
             counterparty: counterparty.to_bytes().to_vec(),
@@ -720,7 +897,8 @@ impl SolanaSettlementBackend {
                 wire::ChannelStatus::Closed => ChannelStatus::Closed,
                 wire::ChannelStatus::Settled => ChannelStatus::Settled,
             },
-            deposited: deposited as u128,
+            counterparty_deposited: deposited as u128,
+            own_deposited: own_deposited as u128,
             redeemed: redeemed as u128,
         })
     }
@@ -809,60 +987,39 @@ impl SettlementBackend for SolanaSettlementBackend {
         Ok(ChannelId(channel.to_string()))
     }
 
-    /// Deposits into the *counterparty's* own on-chain balance -- see
-    /// [`SolanaSettlementBackend::counterparty_signers`]'s doc for why that
-    /// requires this backend to itself hold a signing key for the
-    /// counterparty, which only a [`deploy`](SolanaSettlementBackend::deploy)-built
-    /// backend does. A [`connect`](SolanaSettlementBackend::connect)-built
-    /// production backend refuses with [`SettlementError::Backend`] naming
-    /// that gap, rather than silently depositing into its own balance
-    /// instead (which `redeem`'s bound check, reading the counterparty's
-    /// side, would never see).
+    /// A **self**-deposit (issue #1118): a `Deposit` signed by this
+    /// backend's own `[settlement.solana]` identity, moving `amount` from
+    /// the associated token account [`connect`](SolanaSettlementBackend::connect)
+    /// already creates at boot into the channel's vault PDA, crediting
+    /// this node's own side.
+    ///
+    /// This method used to attempt a deposit into the *counterparty's*
+    /// side and therefore could not work at all on a
+    /// [`connect`](SolanaSettlementBackend::connect)-built backend --
+    /// which is every real node -- because `packages/solana-program`'s
+    /// `Deposit` credits strictly by signer (`processor.rs:309-311`,
+    /// `:356-360`) and no node holds its counterparty's key. The
+    /// instruction was never missing; the port asked for the wrong one.
+    /// Depositing on a counterparty's behalf is now the fixture-only
+    /// [`test_fund_counterparty`](SolanaSettlementBackend::test_fund_counterparty).
     async fn fund(
         &self,
         channel: &ChannelId,
         amount: u128,
     ) -> Result<ChannelState, SettlementError> {
-        if self.counterparty_signers.is_empty() {
-            return Err(SettlementError::Backend(
-                "this backend has no signing authority for an external counterparty's own \
-                 on-chain deposit -- packages/solana-program's Deposit instruction requires the \
-                 depositing participant to sign for themselves, so real deposits happen from the \
-                 counterparty's own wallet directly against the deployed program, never through \
-                 this method in production"
-                    .to_string(),
-            ));
-        }
-        let (pubkey, account) = self.open_channel(channel).await?;
-        let Some(counterparty_signer) = self.counterparty_signers.iter().find(|keypair| {
-            let counterparty_pubkey = keypair.pubkey();
-            account.participant_a == counterparty_pubkey
-                || account.participant_b == counterparty_pubkey
-        }) else {
-            return Err(SettlementError::Backend(
-                "none of this backend's held counterparty keys is a participant of this channel"
-                    .to_string(),
-            ));
-        };
-        let counterparty_pubkey = counterparty_signer.pubkey();
+        let (pubkey, _account) = self.open_channel(channel).await?;
+        let own = self.payer.pubkey();
         let units = to_units(amount)?;
-        let depositor_token_account = spl_associated_token_account::get_associated_token_address(
-            &counterparty_pubkey,
-            &self.token_mint,
-        );
+        let depositor_token_account =
+            spl_associated_token_account::get_associated_token_address(&own, &self.token_mint);
         let (vault, _bump) = wire::vault_pda(&pubkey, &self.program_id);
 
         let instruction = Instruction::new_with_bytes(
             self.program_id,
             &wire::pack_deposit(units),
-            wire::Accounts::deposit(
-                &counterparty_pubkey,
-                &depositor_token_account,
-                &vault,
-                &pubkey,
-            ),
+            wire::Accounts::deposit(&own, &depositor_token_account, &vault, &pubkey),
         );
-        self.submit(&[instruction], &[counterparty_signer]).await?;
+        self.submit(&[instruction], &[]).await?;
 
         let (_pubkey, account) = self.open_channel(channel).await?;
         self.to_channel_state(channel, &account)
@@ -881,10 +1038,10 @@ impl SettlementBackend for SolanaSettlementBackend {
                 already_redeemed: state.redeemed,
             });
         }
-        if claim.cumulative_amount > state.deposited {
+        if claim.cumulative_amount > state.counterparty_deposited {
             return Err(SettlementError::InsufficientChannelBalance {
                 requested: claim.cumulative_amount,
-                deposited: state.deposited,
+                deposited: state.counterparty_deposited,
             });
         }
 
@@ -897,7 +1054,8 @@ impl SettlementBackend for SolanaSettlementBackend {
                 claim.signature.len()
             ))
         })?;
-        let message = wire::balance_proof_message(&pubkey, claim.nonce, transferred_units);
+        let message =
+            wire::balance_proof_message(&self.program_id, &pubkey, claim.nonce, transferred_units);
         let ed25519_instruction =
             wire::ed25519_verify_instruction(&counterparty_pubkey, &signature, &message);
         let claim_instruction = Instruction::new_with_bytes(
@@ -996,7 +1154,8 @@ impl SettlementBackend for SolanaSettlementBackend {
             id: channel.clone(),
             counterparty: counterparty.to_bytes().to_vec(),
             status: ChannelStatus::Settled,
-            deposited: 0,
+            counterparty_deposited: 0,
+            own_deposited: 0,
             redeemed: 0,
         })
     }
@@ -1009,10 +1168,51 @@ impl SettlementBackend for SolanaSettlementBackend {
                 id: channel.clone(),
                 counterparty: Vec::new(),
                 status: ChannelStatus::Settled,
-                deposited: 0,
+                counterparty_deposited: 0,
+                own_deposited: 0,
                 redeemed: 0,
             }),
         }
+    }
+
+    /// The port's ADR 0059 question. On Solana it has always been
+    /// answerable: the channel account is a PDA seeded on the sorted pair
+    /// and the mint (`processor.rs`, `wire::channel_pda`), so deriving
+    /// the address and reading the account *is* the answer. One RPC.
+    ///
+    /// `None` when nothing is at that address -- which includes a pair
+    /// whose channel has settled, since settlement closes the account and
+    /// frees the PDA for their next one. `Err` only when the account
+    /// could not be read at all, so "no channel" is never confused with
+    /// "I could not find out".
+    ///
+    /// `counterparty` is a 32-byte ed25519 public key, the same identity
+    /// [`open`](SettlementBackend::open) takes -- never an EVM address and
+    /// never a node's secp256k1 edge identity, neither of which the
+    /// deployed program could hold as a participant.
+    async fn live_channel_with(
+        &self,
+        counterparty: Vec<u8>,
+    ) -> Result<Option<ChannelId>, SettlementError> {
+        let counterparty = Pubkey::try_from(counterparty.as_slice()).map_err(|_| {
+            SettlementError::Backend(format!(
+                "a packages/solana-program counterparty must be a 32-byte Solana pubkey, got {} bytes",
+                counterparty.len()
+            ))
+        })?;
+        let (channel, _bump) = wire::channel_pda(
+            &self.payer.pubkey(),
+            &counterparty,
+            &self.token_mint,
+            &self.program_id,
+        );
+        let Some(account) = self.fetch_account(&channel).await? else {
+            return Ok(None);
+        };
+        if account.status == wire::ChannelStatus::Settled {
+            return Ok(None);
+        }
+        Ok(Some(ChannelId(channel.to_string())))
     }
 }
 
@@ -1149,5 +1349,52 @@ mod tests {
             ),
             None,
         );
+    }
+}
+
+#[cfg(test)]
+mod cluster_identity_tests {
+    use super::*;
+
+    /// Issue #1131. [`cluster_for_genesis_hash`] reads its hashes from
+    /// `solana-sdk`'s own [`ClusterType::get_genesis_hash`] table rather
+    /// than writing them down, so this test writes them down *once*, here,
+    /// and pins the table to them.
+    ///
+    /// The three literals are what the public endpoints themselves answer
+    /// to `{"jsonrpc":"2.0","id":1,"method":"getGenesisHash"}` -- verified
+    /// against `api.mainnet-beta.solana.com`, `api.devnet.solana.com` and
+    /// `api.testnet.solana.com` on 2026-08-24, agreeing exactly with the
+    /// pinned `solana-sdk =2.1.0`. Without this, a future SDK bump that
+    /// moved a hash would silently relabel a chain -- the very failure
+    /// issue #975 exists to stop -- instead of failing the gate.
+    #[test]
+    fn cluster_names_match_the_published_genesis_hashes() {
+        for (genesis_hash, expected) in [
+            (
+                "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+                "mainnet-beta",
+            ),
+            ("EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", "devnet"),
+            ("4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY", "testnet"),
+        ] {
+            let hash = Hash::from_str(genesis_hash).expect("a published genesis hash is base58");
+            assert_eq!(
+                cluster_for_genesis_hash(&hash),
+                Some(expected),
+                "{genesis_hash} is {expected}'s published genesis hash"
+            );
+        }
+    }
+
+    /// The `solana-test-validator` case, stated without needing one: a
+    /// genesis hash no public cluster published names no cluster, rather
+    /// than being forced into the nearest one. Every `local/` topology and
+    /// every tier-3 test in this workspace lands here, so this is the
+    /// branch that keeps `make local-verify` booting.
+    #[test]
+    fn a_genesis_hash_no_public_cluster_published_names_no_cluster() {
+        assert_eq!(cluster_for_genesis_hash(&Hash::new_unique()), None);
+        assert_eq!(cluster_for_genesis_hash(&Hash::default()), None);
     }
 }
