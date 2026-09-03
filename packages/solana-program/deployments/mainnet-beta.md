@@ -17,14 +17,14 @@ settle in Circle's native USDC. `deploy.sh` has no mint-creation path on any net
 
 ## On-chain addresses
 
-| Item                     | Value                                                          |
-| ------------------------ | -------------------------------------------------------------- |
-| Program ID               | `8e7BhzydH1EqL486tw6Lp99BXviH3i5JN8qNpMSNmHj3`                 |
-| ProgramData account      | `29MT16eh1GCdL4JWrJHjyTWu5ZMn217h25ojCvFpx2wc`                 |
-| Owner (loader)           | `BPFLoaderUpgradeab1e11111111111111111111111`                  |
-| Upgrade authority        | `DaYDFYeCFr6FFyZLGywZV1FPhfbyeuTW65EZ22meEqAi` (deployer)      |
-| Circle USDC mint (6 dp)  | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`                 |
-| Deployer / fee-payer     | `DaYDFYeCFr6FFyZLGywZV1FPhfbyeuTW65EZ22meEqAi`                 |
+| Item                    | Value                                                     |
+| ----------------------- | --------------------------------------------------------- |
+| Program ID              | `8e7BhzydH1EqL486tw6Lp99BXviH3i5JN8qNpMSNmHj3`            |
+| ProgramData account     | `29MT16eh1GCdL4JWrJHjyTWu5ZMn217h25ojCvFpx2wc`            |
+| Owner (loader)          | `BPFLoaderUpgradeab1e11111111111111111111111`             |
+| Upgrade authority       | `DaYDFYeCFr6FFyZLGywZV1FPhfbyeuTW65EZ22meEqAi` (deployer) |
+| Circle USDC mint (6 dp) | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`            |
+| Deployer / fee-payer    | `DaYDFYeCFr6FFyZLGywZV1FPhfbyeuTW65EZ22meEqAi`            |
 
 The USDC mint is a **recorded convention, not an on-chain constraint.** The program takes no
 mint at deploy time and is mint-agnostic per channel: each channel names its own SPL mint at
@@ -67,11 +67,11 @@ the same source at 112,513 bytes against 109,401 elsewhere.
 
 ## Program account sizing and rent
 
-| Item                             | Value                                    |
-| -------------------------------- | ---------------------------------------- |
-| Binary size                      | 109,416 bytes                            |
-| Upgrade headroom allocated (25%) | 27,354 bytes                             |
-| `max_len` / on-chain data length | **136,770 bytes**                        |
+| Item                             | Value                                     |
+| -------------------------------- | ----------------------------------------- |
+| Binary size                      | 109,416 bytes                             |
+| Upgrade headroom allocated (25%) | 27,354 bytes                              |
+| `max_len` / on-chain data length | **136,770 bytes**                         |
 | Rent-exempt deposit              | **953,123,280 lamports (0.95312328 SOL)** |
 
 Reconciles exactly against the rent formula in `docs/solana-deployment.md`:
@@ -87,18 +87,18 @@ requires upgrade authority.
 
 ## Cost
 
-| Item                                  | SOL           |
-| ------------------------------------- | ------------- |
-| Deployer funded                        | 1.3998        |
-| Remaining after deploy                 | 0.44497028    |
-| Total moved                            | 0.95482972    |
-| Of which refundable rent deposit       | 0.95312328    |
-| **Irrecoverable (transaction fees)**   | **0.00170644** |
+| Item                                 | SOL            |
+| ------------------------------------ | -------------- |
+| Deployer funded                      | 1.3998         |
+| Remaining after deploy               | 0.44497028     |
+| Total moved                          | 0.95482972     |
+| Of which refundable rent deposit     | 0.95312328     |
+| **Irrecoverable (transaction fees)** | **0.00170644** |
 
 ## Transaction signatures
 
-| Action | Signature                                                                                            |
-| ------ | ---------------------------------------------------------------------------------------------------- |
+| Action | Signature                                                                                                   |
+| ------ | ----------------------------------------------------------------------------------------------------------- |
 | Deploy | `2yXbkgQ2ZC3iuuNneqpqsCakF7C1HefBQEnWDWjaZRhQC4HYYy4AaAcEyuCzojtnSpkdgPAcV7D9pipWDGMKck1b` (slot 439316400) |
 
 ## Verification
