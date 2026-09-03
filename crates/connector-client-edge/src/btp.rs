@@ -49,12 +49,12 @@ use connector_btp::{
     PAYMENT_REQUIRED_PROTOCOL, PAYOUT_CLAIM_PROTOCOL,
 };
 use connector_domain::client_claim::{ClientClaim, EVM_NAMESPACE};
-use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{condition_is_present, PacketResponse, Prepare, Price, Reject, RejectCode};
 use connector_signer::{verify_evm_claim_state_challenge, EvmClaimStateChallenge};
 
 use crate::channels::decode_hex_bytes;
 use crate::claim_gate::DurabilityTicket;
-use crate::peer::BtpAuthVerdict;
+use crate::peer::BtpClaimVerdict;
 use crate::{claim_rejection_reject, x402_terms_body, ClaimIngestRejection, ClientEdgeState};
 
 /// `GET /ilp/btp` -- the upgrade. The `btp` subprotocol is selected when
@@ -124,11 +124,12 @@ async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
     // this registry existed.
     let mut binding: Option<(String, u64)> = None;
     // ADR 0027 / issue #678: this socket serves two audiences. A session
-    // starts `client` -- `SessionRole`'s own default, not a third state --
-    // and becomes a peer session only when an `auth` entry proving §1.2's
-    // P1 *and* P2 arrives. Once it does, every remaining frame is the peer
-    // carriage's; frames processed before that stay client frames and are
-    // never retroactively reclassified (§1.5).
+    // starts as a client's and becomes a peer session when a frame arrives
+    // carrying a claim that proves §1.2's P2 *and* P3. Once it does, every
+    // remaining frame is the peer carriage's -- which re-decides role from
+    // each one, because role is a property of the frame (§1.5). Frames
+    // processed before the handover stay client frames and are never
+    // retroactively reclassified.
     let mut peer_session: Option<connector_peer_btp::PeerSession> = None;
     while let Some(received) = stream.next().await {
         let frame_bytes = match received {
@@ -147,9 +148,8 @@ async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
         }
         match peer_handover(&frame_bytes, &state) {
             // Not consumed: the same frame is handed to the peer session,
-            // which binds its own role from it and answers it (§1.5 --
-            // role is bound in exactly one place).
-            Some(BtpAuthVerdict::Peer) => {
+            // which decides its own role from it and answers it.
+            Some(BtpClaimVerdict::Peer) => {
                 let peer_state = state
                     .peers
                     .as_ref()
@@ -167,28 +167,7 @@ async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
                 peer_session = Some(session);
                 continue;
             }
-            // §1.5's credential-smuggling defence: more than one `auth`
-            // entry on one frame is refused, not resolved. ERROR stays
-            // reserved for a frame this connector will not act on (§6.2).
-            Some(BtpAuthVerdict::Ambiguous) => {
-                let frame = decode_frame(&frame_bytes).expect("peeked frames already decoded");
-                if reply(
-                    &replies,
-                    encode_error(
-                        frame.request_id,
-                        "F00",
-                        "NotAcceptedError",
-                        b"more than one auth entry on one frame",
-                    ),
-                )
-                .await
-                .is_err()
-                {
-                    break;
-                }
-                continue;
-            }
-            Some(BtpAuthVerdict::Client) | None => {}
+            Some(BtpClaimVerdict::Client) | None => {}
         }
         if handle_frame(
             &frame_bytes,
@@ -216,32 +195,33 @@ async fn btp_session(socket: WebSocket, state: Arc<ClientEdgeState>) {
     let _ = writer.await;
 }
 
-/// Whether this frame's `auth` entry hands the rest of the session to the
-/// peer carriage (`peer-carriage-spec.md` §1.2, §1.5, issue #678).
+/// Whether this frame's claim hands the rest of the session to the peer
+/// carriage (`peer-carriage-spec.md` §1.2, §1.5, issue #678).
 ///
-/// `None` for every frame that is not a MESSAGE carrying an `auth` entry,
-/// and for every node that mounts no BTP peer carriage -- which is the
-/// whole of what this costs a client session: one `iter().any()` over a
-/// frame's protocolData, on the frames that carry a credential.
+/// `None` for every frame carrying no claim entry, and for every node that
+/// mounts no BTP peer carriage -- which is the whole of what this costs a
+/// client session: one `find` over a frame's protocolData, and on the
+/// frames that do carry a claim, one signature check against a channel this
+/// node has no `[[peer_channels]]` row for, which fails at the row lookup
+/// before any curve arithmetic.
+///
+/// Both frame types are peeked, not only MESSAGE: a peering's FLUSH is a
+/// TRANSFER, and it carries a claim exactly as a claim-bearing MESSAGE
+/// does. Under the credential this could key on MESSAGE alone because the
+/// `auth` entry only ever rode one.
 ///
 /// The frame is **peeked, not consumed**. §1.3 forbids inferring role from
-/// the listener, and this function inspects nothing but the credential and
-/// the configured policy; the binding itself happens once, inside
-/// [`connector_peer_btp::PeerSession`], from this very frame.
-fn peer_handover(frame_bytes: &[u8], state: &Arc<ClientEdgeState>) -> Option<BtpAuthVerdict> {
+/// the listener, and this function inspects nothing but the frame's claim
+/// and the configured policy; the peer session decides again from this very
+/// frame.
+fn peer_handover(frame_bytes: &[u8], state: &Arc<ClientEdgeState>) -> Option<BtpClaimVerdict> {
     let peers = state.peers.as_ref()?;
     let frame = decode_frame(frame_bytes).ok()?;
-    if frame.frame_type != BTP_MESSAGE {
+    if frame.frame_type != BTP_MESSAGE && frame.frame_type != BTP_TRANSFER {
         return None;
     }
-    if !frame
-        .protocol_data
-        .iter()
-        .any(|entry| entry.name == AUTH_PROTOCOL)
-    {
-        return None;
-    }
-    Some(peers.btp_auth_verdict(&frame.protocol_data))
+    connector_peer_btp::claim_json::from_protocol_data(&frame.protocol_data)?;
+    Some(peers.btp_claim_verdict(&frame.protocol_data))
 }
 
 /// A slot in the session's in-flight window, holding the read loop back
@@ -454,7 +434,7 @@ fn reject_response(request_id: u32, reject: Reject, extra: Vec<ProtocolData>) ->
 /// `WireClaim`'s own fields, `signature` hex-encoded the same way
 /// `ClientClaimGate`'s inbound claim JSON already expects one
 /// (`0x`-prefixed 65-byte `r‖s‖recoveryId`). JSON rather than
-/// [`connector_runtime::WireClaim::encode`]'s peer-wire binary shape,
+/// [`connector_runtime::WireClaim::encode`]'s peer-role binary shape,
 /// matching every other protocolData entry this dialect ever carries -- the
 /// auth secret, the inbound claim, the x402 terms, the accumulated-cost
 /// total -- all of which are raw UTF-8 text, never a second binary
@@ -464,7 +444,7 @@ fn reject_response(request_id: u32, reject: Reject, extra: Vec<ProtocolData>) ->
 /// (never trusted -- see `ClientClaimGate`'s own doc), this claim's signer
 /// is the channel's own recorded counterparty from the client's point of
 /// view, implicit in which channel the TRANSFER arrived on, exactly as a
-/// peer-wire `WireClaim` carries no signer field either.
+/// peer-role `WireClaim` carries no signer field either.
 ///
 /// This is the mapping of a *claim* onto the grammar, so it stays with the
 /// client edge rather than moving into [`connector_btp`] with the codec
@@ -670,7 +650,20 @@ async fn handle_frame(
     // One lookup serves every fact (issue #701, ADR 0028): see
     // `handle_ilp`'s mirror of this on the HTTP carriage.
     let client_route = state.connector.client_route(&prepare.destination);
-    let price = client_route.map_or(0, |route| route.price);
+    // The schedule at this packet's own payload length (ADR 0065), exactly
+    // as `handle_ilp` computes it on the HTTP carriage -- one rule, so a
+    // sender is charged the same for the same packet whichever transport it
+    // arrives on.
+    let schedule = client_route
+        .as_ref()
+        .map_or(Price::FREE, |route| route.price);
+    let charge = schedule.charge(prepare.data.len());
+    // Issue #1210: see `handle_ilp`'s mirror of this on the HTTP carriage --
+    // what a client should send to use this route, read off the same lookup
+    // its price and transport policy come from.
+    let request = client_route
+        .as_ref()
+        .and_then(|route| route.request.as_ref());
     // Issue #807: see `handle_ilp`'s mirror of this on the HTTP carriage --
     // a condition-less PREPARE is structurally a bootstrap/greeting probe,
     // never a real payment attempt, regardless of destination.
@@ -686,15 +679,15 @@ async fn handle_frame(
     // `payment-required` protocolData slot the §1.4 greeting below uses,
     // self-diagnosing via `extra.requiredTransport` rather than a second
     // mechanism.
-    if let Some(policy) = client_route.map(|route| route.transport_policy) {
+    if let Some(policy) = client_route.as_ref().map(|route| route.transport_policy) {
         if !policy.accepts_btp() {
             let terms = x402_terms_body(
                 &prepare.destination,
-                price,
-                state.settlement_terms.as_ref(),
-                &state.settlements,
-                state.bootstrap_identity.as_ref(),
+                schedule,
+                prepare.data.len(),
+                &state.node,
                 Some(policy.name()),
+                request,
             );
             let reject = Reject {
                 code: RejectCode::f02_unreachable(),
@@ -728,14 +721,14 @@ async fn handle_frame(
     // A claimless PREPARE to an unpriced route falls through unchanged,
     // exactly as on HTTP -- unless the PREPARE itself carries no execution
     // condition (issue #807), the same broadening `handle_ilp` applies.
-    if claim_json.is_none() && (price > 0 || !condition_present) {
+    if claim_json.is_none() && (charge > 0 || !condition_present) {
         let terms = x402_terms_body(
             &prepare.destination,
-            price,
-            state.settlement_terms.as_ref(),
-            &state.settlements,
-            state.bootstrap_identity.as_ref(),
+            schedule,
+            prepare.data.len(),
+            &state.node,
             None,
+            request,
         );
         let reject = Reject {
             code: RejectCode::f06_unexpected_payment(),
@@ -763,9 +756,9 @@ async fn handle_frame(
     // in the same place -- after the greeting, before the claim is admitted
     // -- so a packet this connector will not carry never spends the
     // client's watermark on either carriage (§9's no-drift invariant).
-    if let Some(route) = client_route {
+    if let Some(route) = client_route.as_ref() {
         if let Some(reject) =
-            crate::over_carried_reject(&prepare.destination, route.kind, prepare.amount, price)
+            crate::over_carried_reject(&prepare.destination, route.kind, prepare.amount, charge)
         {
             return reply(
                 replies,
@@ -787,49 +780,17 @@ async fn handle_frame(
     // is, so that claim is left entirely unadmitted rather than spent on
     // a packet already known to be going nowhere. `finish_frame` below
     // still routes `prepare` unchanged and raises the identical F00
-    // itself. Issue #887 extends the same seam to a peer-sale purchase
-    // whose own shape already dooms it, for the same reason: the shape
-    // refusal is identical with or without the claim.
+    // itself.
     let admitted = match claim_json {
-        Some(json)
-            if !state.connector.envelope_target_would_be_refused(&prepare)
-                && !state
-                    .connector
-                    .peer_sale_purchase_would_be_refused(&prepare) =>
-        {
-            // Issue #887's identity-keyed peek, mirroring `handle_ilp`
-            // (§9: the two carriages must not drift): the claim's own
-            // declared channel key, read without admitting it, refuses a
-            // rate-limited or row-capped purchase unpaid with the settle
-            // path's identical message. Sound because admission verifies
-            // the signature against exactly the declared channel.
-            if let Some(message) =
-                state
-                    .connector
-                    .peer_sale_purchase_refusal_for_payer(&prepare, || {
-                        connector_domain::client_claim::parse_client_claim(&json)
-                            .ok()
-                            .map(|claim| claim.channel_key())
-                    })
-            {
-                return reply(
-                    replies,
-                    reject_response(
-                        frame.request_id,
-                        crate::peer_sale_bound_reject(message),
-                        Vec::new(),
-                    ),
-                )
-                .await;
-            }
-            match state.claim_gate.admit(&json, price).await {
+        Some(json) if !state.connector.envelope_target_would_be_refused(&prepare) => {
+            match state.claim_gate.admit(&json, charge).await {
                 Ok(accepted) => Some(accepted),
                 Err(rejection) => {
                     return reply(
                         replies,
                         reject_response(
                             frame.request_id,
-                            claim_rejection_reject(rejection, price),
+                            claim_rejection_reject(rejection, charge),
                             Vec::new(),
                         ),
                     )
@@ -840,13 +801,20 @@ async fn handle_frame(
         _ => None,
     };
 
+    // Issue #1012: decided here, off the one route lookup above, because
+    // `finish_frame` runs detached from it -- the same fact `handle_ilp`
+    // reads inline on the HTTP carriage, through the same helper.
+    let is_forwarded_route = crate::is_forwarded_route(client_route);
     let session_address = binding.as_ref().map(|(address, _)| address.clone());
     let permit = window_slot(window).await;
     let task = finish_frame(
         Arc::clone(state),
         admitted,
-        prepare,
-        price,
+        MatchedRoute {
+            prepare,
+            charge,
+            is_forwarded_route,
+        },
         frame.request_id,
         replies.clone(),
         session_address,
@@ -856,6 +824,22 @@ async fn handle_frame(
         task.await;
     });
     Ok(())
+}
+
+/// [`finish_frame`]'s own `prepare` plus the two facts about its matched
+/// route (issue #701, ADR 0028) that finishing it needs -- bundled so
+/// `finish_frame` stays under clippy's argument-count lint rather than
+/// growing a ninth loose parameter for issue #1012.
+struct MatchedRoute {
+    prepare: Prepare,
+    /// What this connector charges for **this** packet: the route's schedule
+    /// evaluated at its own payload length (ADR 0065), which for a flat route
+    /// is the flat price it always was.
+    charge: u64,
+    /// Whether `prepare`'s destination matched a *forwarded* route --
+    /// see [`roll_back_uncarried_forward`](crate::roll_back_uncarried_forward)'s
+    /// own doc for why `finish_frame` needs to know.
+    is_forwarded_route: bool,
 }
 
 /// A judged frame's remaining, order-insensitive work (issue #688), run
@@ -868,17 +852,28 @@ async fn handle_frame(
 async fn finish_frame(
     state: Arc<ClientEdgeState>,
     admitted: Option<(ClientClaim, DurabilityTicket)>,
-    prepare: Prepare,
-    price: u64,
+    matched: MatchedRoute,
     request_id: u32,
     replies: mpsc::Sender<Vec<u8>>,
     session_address: Option<String>,
 ) {
+    let MatchedRoute {
+        prepare,
+        charge,
+        is_forwarded_route,
+    } = matched;
     // Issue #535/ADR 0036: the channel a covering claim admitted this
     // packet on, read before `admitted` is consumed below, so it can ride
     // into the `"packet"` span the same way the HTTP carriage's `handle_ilp`
     // threads its own `admitted.channel_key` through.
     let client_channel_id = admitted.as_ref().map(|(claim, _)| claim.channel_key());
+    // Issue #1012: the watermark this claim advanced its channel to, kept
+    // for the same reason `handle_ilp`'s HTTP carriage keeps it -- so a
+    // forwarded route whose next hop terminally rejects can roll back
+    // exactly this claim.
+    let admitted_claim_watermark = admitted
+        .as_ref()
+        .map(|(claim, _)| crate::AdmittedWatermark::of(claim));
 
     if let Some((claim, durability)) = admitted {
         match durability.durable().await {
@@ -891,7 +886,7 @@ async fn finish_frame(
                     &replies,
                     reject_response(
                         request_id,
-                        claim_rejection_reject(rejection, price),
+                        claim_rejection_reject(rejection, charge),
                         Vec::new(),
                     ),
                 )
@@ -904,14 +899,18 @@ async fn finish_frame(
     // Issue #736: the same fourth routing arm `handle_ilp`'s HTTP carriage
     // uses -- a configured route first, then whatever client session
     // `state.session_registry` has bound to this destination.
-    let response = match crate::session_route::route_prepare(
+    let packet_response =
+        crate::session_route::route_prepare(&state, prepare, charge, client_channel_id.as_deref())
+            .await;
+    crate::roll_back_uncarried_forward(
         &state,
-        prepare,
-        price,
+        is_forwarded_route,
         client_channel_id.as_deref(),
+        admitted_claim_watermark,
+        &packet_response,
     )
-    .await
-    {
+    .await;
+    let response = match packet_response {
         PacketResponse::Fulfill(fulfill) => encode_response(request_id, &[], &fulfill.encode()),
         PacketResponse::Reject(reject) => reject_response(request_id, reject, Vec::new()),
     };
@@ -926,7 +925,7 @@ mod tests {
     /// Issue #699: a payout claim rides a TRANSFER's protocolData as JSON,
     /// matching every other entry this dialect carries (all UTF-8 text,
     /// never a second binary sub-format) rather than
-    /// [`connector_runtime::WireClaim::encode`]'s peer-wire bytes.
+    /// [`connector_runtime::WireClaim::encode`]'s peer-role bytes.
     #[test]
     fn payout_claim_protocol_data_encodes_the_wire_claims_fields_as_json() {
         let claim = connector_runtime::WireClaim {
@@ -1152,14 +1151,12 @@ mod tests {
                 clock,
             )),
             signer: Arc::new(LocalSigner::generate("session-signer")),
-            claim_gate,
+            claim_gate: claim_gate.into(),
             wrap_receiver_secret: None,
-            settlement_terms: None,
-            settlements: Vec::new(),
+            node: Arc::new(connector_domain::NodeFacts::default()),
             btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
             session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
             peers: None,
-            bootstrap_identity: None,
             identities: Arc::from([]),
         }
     }
@@ -1732,5 +1729,76 @@ mod tests {
         let terms: X402PaymentRequired =
             serde_json::from_slice(&terms_bytes).expect("valid x402 terms JSON");
         assert_eq!(terms.accepts[0].amount, "0");
+    }
+
+    /// Issue #1210: a route's `request` table rides the BTP
+    /// `payment-required` REJECT's protocolData exactly as it rides the
+    /// HTTP 402 body -- both carriages share the one emitter
+    /// (`x402_terms_body`), so this is that shared assertion's BTP half.
+    #[tokio::test]
+    async fn an_unpaid_prepare_over_btp_to_a_route_with_a_request_table_is_greeted_with_it() {
+        use chrono::TimeZone;
+        use connector_config::StaticRoute;
+        use connector_runtime::{Connector, FakeAppClient, InProcessPeerTransport, TestClock};
+        use connector_signer::LocalSigner;
+
+        let declared = serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]});
+        let route = StaticRoute::new_priced("g.toon.gas", "http://localhost:4000", 100)
+            .unwrap()
+            .with_request(declared.clone());
+        let clock = Arc::new(TestClock::new(
+            chrono::Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+        ));
+        let gate = crate::claim_gate::ClientClaimGate::restore(
+            Default::default(),
+            Arc::new(connector_runtime::InMemoryJournal::new()),
+        )
+        .expect("a fresh in-memory journal has nothing to replay");
+        let state = Arc::new(ClientEdgeState {
+            connector: Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            )),
+            signer: Arc::new(LocalSigner::generate("session-signer")),
+            claim_gate: gate.into(),
+            wrap_receiver_secret: None,
+            node: Arc::new(connector_domain::NodeFacts::default()),
+            btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
+            session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
+            peers: None,
+            identities: Arc::from([]),
+        });
+
+        let prepare = Prepare {
+            amount: 0,
+            expires_at: chrono::Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+            execution_condition: [1u8; 32],
+            destination: "g.toon.gas".to_string(),
+            data: Vec::new(),
+        };
+        let frame = connector_btp::encode_message(1, &[], &prepare.encode());
+
+        let (replies, mut reply_rx) = mpsc::channel::<Vec<u8>>(REPLY_QUEUE_DEPTH);
+        let window = Arc::new(Semaphore::new(4));
+        let outbound = Arc::new(OutboundRequests::new());
+        let mut binding = None;
+        handle_frame(&frame, &state, &window, &replies, &outbound, &mut binding)
+            .await
+            .expect("the reply channel has a live receiver");
+
+        let sent = reply_rx.recv().await.expect("a reply was sent");
+        let decoded = decode_frame(&sent).expect("the connector's own encoder");
+        let terms_bytes = decoded
+            .protocol_data
+            .iter()
+            .find(|pd| pd.name == PAYMENT_REQUIRED_PROTOCOL)
+            .expect("the greeting's terms ride as payment-required protocolData")
+            .data
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&terms_bytes).unwrap();
+        assert_eq!(value["request"], declared);
     }
 }

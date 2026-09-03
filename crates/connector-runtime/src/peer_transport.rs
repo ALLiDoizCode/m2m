@@ -1,9 +1,9 @@
 //! The peer transport port: forwards a [`Prepare`] to another connector for
 //! the next hop, optionally carrying a claim (issue #423), and flushes a
-//! claim on its own when nothing else is going out (peer-wire-spec.md
+//! claim on its own when nothing else is going out (peer-semantics-pre-868.md
 //! §3.3).
 //!
-//! **This port is the seam ADR 0027 rests on.** The raw-TCP peer wire that
+//! **This port is the seam ADR 0027 rests on.** The raw-TCP transport that
 //! used to implement it was deleted in issue #679 -- it never carried a
 //! production packet -- and the replacement carriages (BTP over `wss://`
 //! and ILP-over-HTTP over `https://`, issue #676) will be built behind this
@@ -23,6 +23,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
+
+use crate::peer_route_store::RuntimePeering;
 
 use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
@@ -53,7 +55,7 @@ pub struct PeerForward {
     /// `response` is this transport's own synthesized `T01` (see
     /// [`peer_unreachable`]). The caller (issue #426, ADR 0011) needs this
     /// to decide whether its own fee belongs on an outgoing REJECT: only a
-    /// hop that actually forwarded earns one (peer-wire-spec.md §5.2).
+    /// hop that actually forwarded earns one (peer-semantics-pre-868.md §5.2).
     pub reached_peer: bool,
     /// The x402 terms the peer quoted while refusing the packet (issue
     /// #874), or `None` when it quoted none. **Absence means "no terms were
@@ -113,12 +115,11 @@ impl PeerForward {
 
 /// Forwards a [`Prepare`] to the connector reachable at `peer_id` and
 /// returns whatever that peer answered, unchanged -- a reject originated at
-/// the far end reaches the caller exactly as that peer sent it.
-/// `minimum_delivery` is the amount the original sender declared must reach
-/// the destination (ADR 0010) -- carried alongside `prepare` rather than
-/// inside it, and passed to the peer unchanged so every hop enforces it
-/// against the same figure. `claim` piggybacks whatever this connector
-/// currently owes `peer_id` (peer-wire-spec.md §3.2).
+/// the far end reaches the caller exactly as that peer sent it. `claim`
+/// piggybacks whatever this connector currently owes `peer_id`
+/// (peer-semantics-pre-868.md §3.2), and is what bounds erosion across the
+/// path now that no declared floor rides beside the packet (ADR 0057,
+/// issue #1143).
 ///
 /// See [`PeerForward`] for what comes back, and in particular for why a
 /// carriage that read x402 terms off a refusal must report them rather than
@@ -129,18 +130,43 @@ pub trait PeerTransport: Send + Sync {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward;
 
     /// Send `claim` with no packet to ride -- the flush mechanism
-    /// (peer-wire-spec.md §3.3) that covers the case traffic to `peer_id`
+    /// (peer-semantics-pre-868.md §3.3) that covers the case traffic to `peer_id`
     /// has stopped. Returns [`ClaimAckOutcome::NotSent`] if `peer_id`
     /// could not be reached.
     async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome;
 }
 
-/// §2.2, §5.1 of `peer-wire-spec.md`: a peer this connector could not reach
+/// Adds and removes a **carriage** while the process serves (ADR 0058).
+///
+/// A dial transport built once at boot from `config.peers()` is what made a
+/// runtime peer row hollow: the row could name a peering the node had no
+/// way to reach. This port is the other half -- a peering established at
+/// runtime registers its carriage here, and a removed one deregisters,
+/// without a restart.
+///
+/// Separate from [`PeerTransport`] rather than a method on it because the
+/// two have different callers and different frequencies: forwarding is the
+/// packet path, and this is an operator write. An implementation may of
+/// course be the same value behind both, and
+/// `connector-cli`'s `ConfiguredPeerTransport` is.
+pub trait PeerRegistrar: Send + Sync {
+    /// Make `peering` dialable under `peer_id`, replacing whatever was
+    /// registered under that id. A peering whose endpoint selects no
+    /// carriage this node dials registers nothing and is left unreachable
+    /// -- which is `T01` with the peer named, the answer an undialable
+    /// peering has always had (`peer-carriage-spec.md` §2.2).
+    fn register(&self, peer_id: &str, peering: &RuntimePeering);
+
+    /// Stop dialing `peer_id`. A no-op for an id that was never
+    /// registered.
+    fn deregister(&self, peer_id: &str);
+}
+
+/// §2.2, §5.1 of `peer-semantics-pre-868.md`: a peer this connector could not reach
 /// rejects `T01`. Never `T00`, and never a silent drop. Every carriage
 /// reaches this through [`PeerForward::unreachable`], so the refusal an
 /// unreachable peer produces has one definition rather than one per wire.
@@ -162,7 +188,6 @@ pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
 enum PeerMessage {
     Prepare {
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
         respond_to: oneshot::Sender<(PacketResponse, ClaimAckOutcome)>,
     },
@@ -173,7 +198,7 @@ enum PeerMessage {
 }
 
 /// A handle to a peer [`Connector`], reachable only by message -- the
-/// in-process stand-in for the peer wire's persistent duplex stream. The
+/// in-process stand-in for the peer semantics's persistent duplex stream. The
 /// `Connector` behind a `PeerLink` is owned exclusively by the task spawned
 /// in [`PeerLink::connect`]; nothing outside that task ever touches it
 /// directly, so there is no lock on this path, on either side of it.
@@ -196,13 +221,10 @@ impl PeerLink {
                 match message {
                     PeerMessage::Prepare {
                         prepare,
-                        minimum_delivery,
                         claim,
                         respond_to,
                     } => {
-                        let result = connector
-                            .handle_peer_prepare(prepare, minimum_delivery, claim)
-                            .await;
+                        let result = connector.handle_peer_prepare(prepare, claim).await;
                         let _ = respond_to.send(result);
                     }
                     PeerMessage::Flush { claim, respond_to } => {
@@ -219,7 +241,6 @@ impl PeerLink {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward {
         let (respond_to, receiver) = oneshot::channel();
@@ -227,7 +248,6 @@ impl PeerLink {
             .sender
             .send(PeerMessage::Prepare {
                 prepare,
-                minimum_delivery,
                 claim,
                 respond_to,
             })
@@ -289,14 +309,10 @@ impl PeerTransport for InProcessPeerTransport {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward {
         match self.peers.get(peer_id) {
-            Some(link) => {
-                link.forward(peer_id, prepare, minimum_delivery, claim)
-                    .await
-            }
+            Some(link) => link.forward(peer_id, prepare, claim).await,
             None => PeerForward::unreachable(peer_id),
         }
     }
@@ -389,7 +405,7 @@ mod tests {
             ack,
             reached_peer: reached,
             ..
-        } = transport.forward("peer-b", sealed, 0, None).await;
+        } = transport.forward("peer-b", sealed, None).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -415,7 +431,7 @@ mod tests {
             reached_peer: reached,
             ..
         } = transport
-            .forward("nowhere", prepare("g.example.app"), 0, None)
+            .forward("nowhere", prepare("g.example.app"), None)
             .await;
 
         match response {
@@ -427,7 +443,7 @@ mod tests {
         }
         assert_eq!(ack, ClaimAckOutcome::NotSent);
         // Never reached: nothing forwarded, so no fee ever belongs to this
-        // hop (ADR 0011, peer-wire-spec.md §5.2).
+        // hop (ADR 0011, peer-semantics-pre-868.md §5.2).
         assert!(!reached);
     }
 
@@ -448,7 +464,7 @@ mod tests {
             reached_peer: reached,
             ..
         } = transport
-            .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0, None)
+            .forward("peer-b", prepare("g.nowhere-on-peer-b"), None)
             .await;
 
         match response {
@@ -484,7 +500,7 @@ mod tests {
         let claim = sign_wire_claim(&signer, 1, 1, 50);
 
         let PeerForward { response, ack, .. } = transport
-            .forward("peer-b", prepare("g.nowhere"), 0, Some(claim))
+            .forward("peer-b", prepare("g.nowhere"), Some(claim))
             .await;
 
         // The claim is judged independently of the packet: no route exists
@@ -543,7 +559,7 @@ mod tests {
             let transport = transport.clone();
             handles.push(tokio::spawn(async move {
                 transport
-                    .forward("peer-b", prepare("g.example.app"), 0, None)
+                    .forward("peer-b", prepare("g.example.app"), None)
                     .await
             }));
         }
@@ -610,7 +626,7 @@ mod tests {
                 response,
                 reached_peer: reached,
                 ..
-            } = transport.forward("peer-b", sealed, 0, None).await;
+            } = transport.forward("peer-b", sealed, None).await;
             match response {
                 PacketResponse::Fulfill(fulfill) => {
                     assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
@@ -628,7 +644,7 @@ mod tests {
                 reached_peer: reached,
                 ..
             } = transport
-                .forward("peer-c", prepare("g.nowhere-on-peer-c"), 0, None)
+                .forward("peer-c", prepare("g.nowhere-on-peer-c"), None)
                 .await;
             match response {
                 PacketResponse::Reject(reject) => {
@@ -644,7 +660,7 @@ mod tests {
                 reached_peer: reached,
                 ..
             } = transport
-                .forward("nowhere", prepare("g.example.app"), 0, None)
+                .forward("nowhere", prepare("g.example.app"), None)
                 .await;
             match response {
                 PacketResponse::Reject(reject) => {

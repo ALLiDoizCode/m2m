@@ -103,10 +103,7 @@ If you find Standards improvements to make:
 1. Make the changes directly on this branch
 2. Run connector's gate to ensure nothing is broken —
    `npm run lint --workspaces --if-present`, `npm run typecheck`,
-   `npm run build` (ordered: `shared` → `mina-zkapp` → rest), and
-   `npm run test --workspaces --if-present`. The `mina-zkapp` jest suite is
-   WASM-heavy — run it with
-   `NODE_OPTIONS='--max-old-space-size=8192' npm test --workspace=packages/mina-zkapp -- --runInBand`.
+   `npm run build`, and `npm run test --workspaces --if-present`.
 3. Commit describing the refinements
 
 If the code is already clean and well-structured, make no commits.

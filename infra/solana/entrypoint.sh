@@ -1,30 +1,43 @@
 #!/bin/sh
 # Solana Test Validator Entrypoint
-# Starts the validator, waits for readiness, derives a funded fee-payer from
-# the genesis keypairs the validator itself creates, and deploys all .so
-# programs from /programs.
 #
-# Follows the same non-fatal deploy pattern as the Anvil entrypoint.
+# Loads the payment-channel program into GENESIS at a fixed program id and
+# starts the validator. Nothing is deployed after startup and no keypair is
+# needed for any of it.
 #
-# NOTE on keypairs / why NO committed key is needed:
-#   The ghcr.io/beeman/solana-test-validator image ships `solana` +
-#   `solana-test-validator` but NOT `solana-keygen`, so we cannot generate a
-#   wallet at runtime, and we deliberately do NOT bake/commit one into the repo.
-#   Instead we reuse a keypair the validator creates for us at genesis:
-#   `<ledger>/validator-keypair.json`. In local `solana-test-validator` genesis
-#   this validator identity account is funded heavily (hundreds of SOL), which
-#   is more than enough to pay for `solana program deploy`. We point the Solana
-#   CLI at it as the default signer, so the deploy needs neither a committed key
-#   nor solana-keygen.
+# ── Why --bpf-program and not `solana program deploy` ──────────────────────
+#   This used to start the validator, derive a fee payer from the genesis
+#   keypairs, and then `solana program deploy --program-id <keypair>` every
+#   .so in /programs. That required a `payment_channel-keypair.json` sitting
+#   beside the .so to make the program id deterministic -- and that file is
+#   UNTRACKED (tools/ci/check-tracked-secrets.sh matches `*-keypair.json`, and
+#   program keypairs are exactly the class that guard exists to catch, see
+#   connector#920/#922). `cargo build-sbf` generates one per machine on first
+#   build, so the id was deterministic for whoever happened to have built the
+#   program locally and random for everyone else -- the entrypoint's fallback
+#   branch deployed "with a fresh (non-deterministic) id" on every `up`.
 #
-#   Programs are deployed with an explicit, mounted program keypair
-#   (/programs/<name>-keypair.json) when present so the program id is
-#   DETERMINISTIC across `up`/`down` cycles (the connector reads it from
-#   SOLANA_TEST_PROGRAM_ID).
+#   A program id that changes per machine cannot appear in a committed
+#   `connector.toml`, and ADR 0009 gives no environment-variable layer to
+#   patch one in at runtime. So this now does what the Rust test harness
+#   already does (connector-settlement-solana's `SolanaValidator::spawn`):
+#   passes the .so to `--bpf-program` under a BARE program id at genesis. No
+#   keypair, no deploy step, no fee payer, and the SAME id both tiers use --
+#   which is what makes the id committable.
+#
+#   PROGRAM_ID below must stay equal to
+#   `connector_settlement_solana::test_support::LOCAL_TEST_PROGRAM_ID`.
+#   `crates/connector-settlement-solana/tests/local_program_id_is_shared.rs`
+#   fails if they drift.
 set -eu
 
-# Explicit ledger dir so we can reliably locate the genesis-created keypairs.
-# (Default is ./test-ledger relative to CWD; we pin it to be robust.)
+# The program id the .so is loaded under, in this validator's genesis only.
+# Distinct from the deployed devnet program (see
+# packages/solana-program/deployments/devnet-public.md).
+PROGRAM_ID=HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR
+PROGRAM_SO=/programs/payment_channel.so
+
+# Explicit ledger dir rather than the default ./test-ledger relative to CWD.
 LEDGER_DIR=/workspace/test-ledger
 
 # Trap SIGTERM/SIGINT and forward to the validator for graceful shutdown
@@ -35,103 +48,42 @@ cleanup() {
 }
 trap cleanup TERM INT
 
+# The .so is bind-mounted from ./target/deploy, which `make solana-build`
+# produces. Coming up WITHOUT it is a real state -- somebody ran `docker
+# compose up` directly on a tree that has never built the program -- and the
+# validator is still useful for anything that doesn't touch settlement, so
+# this warns loudly rather than refusing. Every settlement call against such
+# a validator fails with the program not existing, which is a clear enough
+# error to trace back to this line. `make solana-up` depends on solana-build
+# so the supported path never reaches here.
+if [ -f "$PROGRAM_SO" ]; then
+  echo "Loading $PROGRAM_SO into genesis at $PROGRAM_ID"
+  set -- --bpf-program "$PROGRAM_ID" "$PROGRAM_SO"
+else
+  echo "WARNING: $PROGRAM_SO is missing -- starting with NO payment-channel program."
+  echo "WARNING: run 'make solana-build' and recreate this container before settling."
+  set --
+fi
+
 # --limit-ledger-size caps how many shreds the rocksdb ledger retains. NOTE the
 # `solana-test-validator` default is only 10000 shreds (NOT the full validator's
-# 200,000,000) — so the old explicit 50,000,000 here was a ~5000x override that
+# 200,000,000) -- so the old explicit 50,000,000 here was a ~5000x override that
 # let rocksdb grow to ~63 GB in ~21h and fill the 80 GB devnet box's disk. When
 # the disk is full the validator silently STOPS producing blocks (slot freezes)
 # while /health still returns "ok", so faucet/settlement writes hang then 500.
-# 10,000,000 shreds bounds the ledger to ~12-13 GB (~1.26 KB/shred observed) —
+# 10,000,000 shreds bounds the ledger to ~12-13 GB (~1.26 KB/shred observed) --
 # generous recent history for claim verification, with wide headroom on disk.
 # Verified accepted by this image's validator (agave 4.0.3, ghcr.io/beeman/
 # solana-test-validator): `--limit-ledger-size` defaults to only 10000 shreds and
 # enforces NO 50M minimum (that floor is the full `solana-validator`, not the
-# test validator), so 10,000,000 starts cleanly — no crash-loop risk.
-solana-test-validator --reset --ledger "$LEDGER_DIR" --limit-ledger-size 10000000 &
+# test validator), so 10,000,000 starts cleanly -- no crash-loop risk.
+solana-test-validator --reset --ledger "$LEDGER_DIR" --limit-ledger-size 10000000 "$@" &
 VALIDATOR_PID=$!
 
-# Wait for readiness
 echo "Waiting for Solana validator to be ready..."
 until solana cluster-version --url http://localhost:8899 2>/dev/null; do
   sleep 1
 done
-echo "Validator ready."
 
-# Establish a default signer WITHOUT any committed key or solana-keygen:
-# reuse the genesis-funded validator identity keypair the validator just wrote
-# into the ledger dir. Copy it into the CLI config dir (the source may be
-# read-only / owned differently) and point the CLI at it.
-DEFAULT_KEYPAIR="/home/solana/.config/solana/id.json"
-GENESIS_KEYPAIR="$LEDGER_DIR/validator-keypair.json"
-mkdir -p "$(dirname "$DEFAULT_KEYPAIR")"
-
-# Wait briefly for the genesis keypair to materialize (the validator writes it
-# during genesis init, which completes around the time RPC comes up).
-for i in $(seq 1 10); do
-  [ -f "$GENESIS_KEYPAIR" ] && break
-  echo "Waiting for genesis keypair at $GENESIS_KEYPAIR ($i/10)..."
-  sleep 1
-done
-
-if [ -f "$GENESIS_KEYPAIR" ] && cp "$GENESIS_KEYPAIR" "$DEFAULT_KEYPAIR" 2>/dev/null; then
-  solana config set --keypair "$DEFAULT_KEYPAIR" --url http://localhost:8899 >/dev/null 2>&1 || true
-  echo "Using genesis validator-identity keypair as fee-payer: $(solana address --keypair "$DEFAULT_KEYPAIR" 2>/dev/null || echo '<unknown>')"
-else
-  # Fallbacks (in order): genesis faucet keypair, then solana-keygen if it
-  # happens to exist. These keep the entrypoint robust if the layout changes.
-  FAUCET_KEYPAIR="$LEDGER_DIR/faucet-keypair.json"
-  if [ -f "$FAUCET_KEYPAIR" ] && cp "$FAUCET_KEYPAIR" "$DEFAULT_KEYPAIR" 2>/dev/null; then
-    solana config set --keypair "$DEFAULT_KEYPAIR" --url http://localhost:8899 >/dev/null 2>&1 || true
-    echo "Using genesis faucet keypair as fee-payer: $(solana address --keypair "$DEFAULT_KEYPAIR" 2>/dev/null || echo '<unknown>')"
-  else
-    echo "No genesis keypair found; attempting solana-keygen (may be unavailable in this image)."
-    solana-keygen new --no-bip39-passphrase --force --silent 2>/dev/null || true
-  fi
-fi
-
-# Top up the fee-payer via airdrop (best-effort). The genesis validator/faucet
-# identity is already heavily funded, so this is just belt-and-suspenders and is
-# fine if it fails.
-AIRDROP_RETRIES=5
-for i in $(seq 1 $AIRDROP_RETRIES); do
-  if solana airdrop 1000 --url http://localhost:8899 2>/dev/null; then
-    echo "Airdrop successful."
-    break
-  fi
-  echo "Airdrop attempt $i/$AIRDROP_RETRIES failed, retrying..."
-  sleep 2
-done
-
-# Warn if the fee-payer somehow has no SOL (deploy will fail without it).
-if ! solana balance --url http://localhost:8899 2>/dev/null | grep -q '[1-9]'; then
-  echo "WARNING: fee-payer has no SOL. Program deploys will likely fail."
-fi
-
-# Deploy all programs from /programs (non-fatal, matching Anvil pattern).
-# When a sibling <name>-keypair.json is present, pass it as --program-id so the
-# deployed program lands at the deterministic, known program id.
-for so_file in /programs/*.so; do
-  if [ -f "$so_file" ]; then
-    base="${so_file%.so}"
-    program_keypair="${base}-keypair.json"
-    writable_program_keypair="/tmp/$(basename "$program_keypair")"
-    # Copy the (read-only, possibly root-owned) mounted program keypair somewhere
-    # writable so the CLI can read it as a signer. Guard the copy with `|| true`
-    # so a permission error here never crashes the entrypoint (set -e); we simply
-    # fall back to a fresh-id deploy below.
-    if [ -f "$program_keypair" ] && cp "$program_keypair" "$writable_program_keypair" 2>/dev/null; then
-      echo "Deploying $so_file with program id $(solana address --keypair "$writable_program_keypair" 2>/dev/null || echo '<unknown>')"
-      solana program deploy "$so_file" \
-        --program-id "$writable_program_keypair" \
-        --url http://localhost:8899 \
-        || echo "Deploy of $so_file failed (non-fatal)"
-    else
-      echo "No readable program keypair for $so_file; deploying with a fresh (non-deterministic) id."
-      solana program deploy "$so_file" --url http://localhost:8899 \
-        || echo "Deploy of $so_file failed (non-fatal)"
-    fi
-  fi
-done
-
-echo "Solana validator ready with programs deployed!"
+echo "Solana validator ready."
 wait $VALIDATOR_PID

@@ -46,8 +46,25 @@ pub struct ChannelState {
     pub id: ChannelId,
     pub counterparty: Vec<u8>,
     pub status: ChannelStatus,
-    /// Total ever deposited into the channel, across every [`SettlementBackend::fund`] call.
-    pub deposited: u128,
+    /// What the *counterparty* has deposited on their own side of the
+    /// channel -- the collateral backing claims **this** node can
+    /// [`redeem`](SettlementBackend::redeem), and the ceiling every real
+    /// chain bounds such a claim by (`TokenNetwork.claimFromChannel`'s
+    /// `counterpartyState.deposit < newTransferred`,
+    /// `packages/solana-program`'s `TransferredAmountExceedsDeposit`).
+    ///
+    /// Named for whose side it is, not merely "deposited" (issue #1118):
+    /// a payment channel is two-sided on every chain this port settles
+    /// on, and reading one side's number as "the channel's balance" is
+    /// exactly what made [`SettlementBackend::fund`] mean the wrong thing.
+    /// **[`fund`](SettlementBackend::fund) does not move this** -- only
+    /// the counterparty, signing for themselves, can.
+    pub counterparty_deposited: u128,
+    /// What *this* node has deposited on its own side -- the collateral
+    /// backing claims this node signs and its counterparty redeems, and
+    /// what [`SettlementBackend::fund`] raises (issue #1118). Zero on a
+    /// channel this node has never put its own money behind.
+    pub own_deposited: u128,
     /// The highest cumulative amount honored by [`SettlementBackend::redeem`] so far.
     pub redeemed: u128,
 }
@@ -122,6 +139,9 @@ pub enum SettlementError {
     #[error("channel '{0}' is not yet due for settlement")]
     SettlementNotYetDue(ChannelId),
 
+    /// A claim named more than the counterparty has actually deposited on
+    /// their own side ([`ChannelState::counterparty_deposited`]) -- the
+    /// only side a claim this node redeems is ever drawn from.
     #[error("claim of {requested} exceeds the channel's funded balance of {deposited}")]
     InsufficientChannelBalance { requested: u128, deposited: u128 },
 
@@ -193,8 +213,28 @@ pub trait SettlementBackend: Send + Sync {
         settlement_timeout: Duration,
     ) -> Result<ChannelId, SettlementError>;
 
-    /// Deposit `amount` into `channel`, increasing what can be redeemed
-    /// against it. Returns the channel's state after the deposit.
+    /// Deposit `amount` of **this node's own** collateral into `channel`,
+    /// raising [`ChannelState::own_deposited`] -- the balance backing
+    /// claims this node signs and its counterparty redeems. Returns the
+    /// channel's state after the deposit.
+    ///
+    /// A *self*-deposit, deliberately (issue #1118). Until then this meant
+    /// "deposit into the counterparty's side", a delegate deposit only
+    /// `TokenNetwork.setTotalDeposit` supports -- it names the participant
+    /// to credit separately from the caller whose tokens are pulled --
+    /// while `packages/solana-program`'s `Deposit` credits strictly by
+    /// signer (`processor.rs:356-360`, `InvalidParticipant` otherwise).
+    /// The Solana rule is the correct one: a node paying for its
+    /// counterparty's collateral is not a shape production should ever
+    /// have, and defining the port around the affordance only one chain
+    /// offers left `fund` unconditionally broken on the other. An
+    /// implementation whose chain *can* delegate a deposit still must not
+    /// do it here; the contract suite reaches that through
+    /// [`crate::contract::ContractFixture::fund_counterparty`] instead.
+    ///
+    /// The amount is the caller's, never a policy of the implementation's
+    /// own (ADR 0012): a backend that decides on its own when and how much
+    /// to collateralise has grown a treasury.
     async fn fund(
         &self,
         channel: &ChannelId,
@@ -239,4 +279,39 @@ pub trait SettlementBackend: Send + Sync {
 
     /// The current state of `channel`, as last recorded by this backend.
     async fn channel_state(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError>;
+
+    /// **"Do I already have a channel with this counterparty?"** -- ADR
+    /// 0059's one question, asked of whichever chain this backend settles
+    /// on.
+    ///
+    /// `Ok(Some(id))` when a live channel exists between this backend's
+    /// own on-chain identity and `counterparty`; `Ok(None)` when the pair
+    /// has none and [`open`](SettlementBackend::open) is what to do next.
+    /// `Err` is reserved for a lookup that genuinely failed, so "there is
+    /// no channel" is never confused with "I could not find out" -- a
+    /// caller that opens on the second would spend gas on a duplicate.
+    ///
+    /// **Live is `Open` or `Closed`.** A closed channel is still inside
+    /// its challenge window, still holds collateral and still occupies the
+    /// pair's identifier, so reporting it absent hands the caller an
+    /// `open` that fails. Only once it has `Settled` does the pair report
+    /// none again, which is what lets two parties start a fresh channel
+    /// after finishing one (`CONTEXT.md`, **Payment channel**).
+    ///
+    /// The answer must come from the chain's own current state rather than
+    /// from anything this process has observed and remembered: an index
+    /// replayed from a starting block cannot see a channel opened before
+    /// it, and "none exists" out of a half-built index looks exactly like
+    /// the true answer while being the expensive wrong one (ADR 0059
+    /// rejects a local participant index for this reason).
+    ///
+    /// `counterparty` is the same identity [`open`](SettlementBackend::open)
+    /// takes -- **the settlement address of this backend's own chain**, 20
+    /// bytes on EVM and a 32-byte ed25519 public key on Solana, never a
+    /// node's edge identity. An identity this backend cannot parse is
+    /// [`SettlementError::Backend`], the same refusal `open` gives it.
+    async fn live_channel_with(
+        &self,
+        counterparty: Vec<u8>,
+    ) -> Result<Option<ChannelId>, SettlementError>;
 }

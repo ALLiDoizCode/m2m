@@ -19,3 +19,12 @@ target
 data
 .devbox
 devbox.lock
+
+# Vendored Interledger RFCs (ADR 0062). Everything below each file's
+# `<!-- BEGIN VERBATIM UPSTREAM BODY -->` marker is the Interledger Foundation's
+# text, reproduced byte for byte under CC BY-SA 4.0 on the stated condition that
+# it is unmodified -- and reformatting is modification. A preface and its body
+# live in one file and cannot be ignored separately, so the directory is ignored
+# whole. `crates/connector-bin/tests/vendored_rfcs_are_unmodified.rs` catches it
+# if this rule is ever lost (it already caught prettier once).
+docs/rfcs

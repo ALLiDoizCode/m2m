@@ -22,6 +22,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::node::NodeFacts;
+use crate::Price;
+
 /// The x402 version this connector emits and reads.
 pub const X402_VERSION: u32 = 2;
 
@@ -50,6 +53,15 @@ pub struct X402PaymentRequired {
     #[serde(rename = "x402Version")]
     pub x402_version: u32,
     pub resource: X402Resource,
+    /// What a client should send to use the addressed route (issue #1210):
+    /// the matching `[[routes]] request` table, converted to JSON verbatim.
+    /// Sits beside `resource` rather than inside `accepts[]` -- it describes
+    /// the *resource*, not a payment option, and applies whichever payment
+    /// method a payer ends up satisfying. Absent -- not `null` -- when the
+    /// route configured none, so this greeting is byte-identical to what it
+    /// was before this issue; a reader that predates the field ignores it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub request: Option<serde_json::Value>,
     pub accepts: Vec<X402PaymentOption>,
 }
 
@@ -61,11 +73,34 @@ impl X402PaymentRequired {
         self.accepts.first()
     }
 
-    /// What the offer costs, in the asset's base units. `None` when there
-    /// is no offer or its `amount` is not a decimal uint64 -- a greeting
-    /// [`parse_greeting`] accepted always answers `Some`.
+    /// What the **greeted packet** costs, in the asset's base units. `None`
+    /// when there is no offer or its `amount` is not a decimal uint64 -- a
+    /// greeting [`parse_greeting`] accepted always answers `Some`.
+    ///
+    /// For a flat route this is the route's whole price and always was. For
+    /// a route priced by size (ADR 0065) it is that schedule evaluated at the
+    /// payload length of the request being answered, so it is what *this*
+    /// request would have cost. To learn what a differently sized packet
+    /// costs, read [`Self::schedule`] instead of re-greeting.
     pub fn price(&self) -> Option<u64> {
         self.offer()?.amount.parse().ok()
+    }
+
+    /// The addressed route's whole price schedule (ADR 0065): its base, and
+    /// what each started kibibyte of payload adds. `None` when there is no
+    /// offer or either figure is not a decimal uint64.
+    ///
+    /// A greeting from a node that predates schedules carries no
+    /// `pricePerKib`, which reads back as a slope of zero -- a flat price,
+    /// which is exactly what such a node charges.
+    pub fn schedule(&self) -> Option<Price> {
+        let extra = &self.offer()?.extra;
+        let base = extra.price.parse().ok()?;
+        let per_kib = match extra.price_per_kib.as_deref() {
+            None => 0,
+            Some(text) => text.parse().ok()?,
+        };
+        Some(Price::scheduled(base, per_kib))
     }
 
     /// Who the payment is addressed to (the `exact` scheme's `payTo`).
@@ -133,8 +168,29 @@ pub struct X402ChannelExtra {
     pub ilp_address: String,
     #[serde(default)]
     pub endpoint: String,
+    /// The **base** of the addressed route's price schedule: what a packet
+    /// of any size to this destination costs before its payload is counted
+    /// (ADR 0065). Equal to `amount` above for a flat route, which is every
+    /// route that existed before schedules did -- so a reader written
+    /// against the flat greeting reads the same number it always did.
     #[serde(default)]
     pub price: String,
+    /// The **slope** of that schedule: what each started kibibyte of payload
+    /// adds (ADR 0065, issue #984). Absent -- not `"0"` -- on a flat route,
+    /// so a flat greeting is byte-identical to what it was before schedules
+    /// existed and a parser written before this field is unaffected.
+    ///
+    /// This field is what keeps ADR 0011's cacheability property true under
+    /// a schedule. `amount` answers only for a packet the size of the one
+    /// that was greeted; `price` and this together answer for **every**
+    /// size, so one greeting still tells a sender what any packet it might
+    /// send will cost, and it does not have to probe per size.
+    #[serde(
+        rename = "pricePerKib",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub price_per_kib: Option<String>,
     /// The emitting node's own ILP address(es) (issue #807) -- the
     /// authoritative list from `[announce]`, never an echo of the probed
     /// `destination` the way `ilp_address` above is. Present exactly when
@@ -335,37 +391,50 @@ const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
 /// comment gives for [`parse_greeting`] living here rather than being
 /// re-declared per reader.
 ///
-/// Every emitter passes [`GreetingTerms`] rather than eight positional
-/// arguments, four of which are empty on a carriage carrying neither
+/// Every emitter passes [`GreetingTerms`] rather than a row of positional
+/// arguments, most of which are empty on a carriage carrying neither
 /// identity nor settlement terms: named at the call site, two of them
 /// cannot be transposed without anyone noticing.
 pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
     let GreetingTerms {
         destination,
         price,
-        settlement,
-        settlements,
-        ilp_addresses,
-        btp_endpoint,
+        payload_len,
+        node,
         required_transport,
         session_lease_ttl_ms,
+        request,
     } = *terms;
+    // ND-11: every node fact in `extra` is read off the SAME value the node
+    // self-description is projected from. There is no second assembly of
+    // these fields, so the greeting cannot fall behind the document -- which
+    // is the whole of what "the greeting is a projection" buys, and the
+    // structural end of the `requiredTransport` defect.
+    let ilp_addresses: &[String] = node
+        .map(|node| node.ilp_addresses.as_slice())
+        .unwrap_or(&[]);
+    let btp_endpoint: Option<&str> = node.and_then(|node| node.btp_endpoint.as_deref());
+    let settlement: Option<&X402SettlementTerms> = node.and_then(NodeFacts::evm_settlement);
+    let settlements: &[X402ChainSettlementTerms] =
+        node.map(|node| node.settlements.as_slice()).unwrap_or(&[]);
     let terms = X402PaymentRequired {
         x402_version: X402_VERSION,
         resource: X402Resource {
             url: destination.to_string(),
         },
+        request: request.cloned(),
         accepts: vec![X402PaymentOption {
             scheme: "toon-channel".to_string(),
             network: destination.to_string(),
-            amount: price.to_string(),
+            amount: price.charge(payload_len).to_string(),
             pay_to: destination.to_string(),
             max_timeout_seconds: X402_MAX_TIMEOUT_SECONDS,
             http_endpoint: "/ilp".to_string(),
             extra: X402ChannelExtra {
                 ilp_address: destination.to_string(),
                 endpoint: "/ilp".to_string(),
-                price: price.to_string(),
+                price: price.base().to_string(),
+                price_per_kib: (!price.is_flat()).then(|| price.per_kib().to_string()),
                 ilp_addresses: ilp_addresses.to_vec(),
                 btp_endpoint: btp_endpoint.map(str::to_string),
                 settlement: settlement.cloned(),
@@ -390,24 +459,50 @@ pub struct GreetingTerms<'a> {
     /// `extra.ilpAddress` -- there is exactly one payment method and one
     /// party to pay, so all four name the same address.
     pub destination: &'a str,
-    /// What that address costs, quoted as both `amount` and `extra.price`.
-    pub price: u64,
-    /// The emitting node's settlement terms, and the per-chain terms beside
-    /// them; absent on a node that settles nowhere yet.
-    pub settlement: Option<&'a X402SettlementTerms>,
-    pub settlements: &'a [X402ChainSettlementTerms],
-    /// The emitting node's own bootstrap identity (issue #807):
-    /// empty/`None` on a node -- or a carriage -- that carries none.
-    pub ilp_addresses: &'a [String],
-    pub btp_endpoint: Option<&'a str>,
+    /// What that address charges: the whole schedule (ADR 0065), quoted as
+    /// `extra.price` (its base) and `extra.pricePerKib` (its slope).
+    pub price: Price,
+    /// The payload length of the request being answered, in bytes -- what
+    /// `amount` is quoted for.
+    ///
+    /// x402's `amount` is what *this* request costs, so it is the schedule
+    /// evaluated here rather than the schedule's base. A carriage greeting a
+    /// request it has a `Prepare` for passes `prepare.data.len()`; one
+    /// greeting a request that never became a packet passes `0`, and gets
+    /// the base -- the cheapest true answer, and the exact figure a flat
+    /// route quotes either way.
+    pub payload_len: usize,
+    /// The emitting node's own facts -- its addresses, its BTP endpoint and
+    /// the chains it settles on ([`crate::node::NodeFacts`], ADR 0050).
+    ///
+    /// **The same value the node self-description is projected from**, which
+    /// is what ND-11 requires: the greeting is a projection of that
+    /// document's source, never a second description assembled beside it.
+    /// `None` for a carriage that describes no node at all -- the peer
+    /// carriages, whose counterparty already knows this node and needs only
+    /// the figure quoted.
+    pub node: Option<&'a NodeFacts>,
     /// `Some("http" | "btp")` only when this same shape is reused to tell a
     /// client it used the wrong transport entirely (issue #701).
+    ///
+    /// Deliberately **not** the self-description's own `requiredTransport`,
+    /// which is a standing fact about this node's routes. This one is
+    /// self-diagnosing: present only on the greeting answering a request that
+    /// arrived over the wrong carriage (ND-12 -- the greeting keeps its own
+    /// job).
     pub required_transport: Option<&'a str>,
     /// The emitting node's client session lease backstop (issue #722); a
     /// carriage with no client session registry of its own (the peer
     /// carriages) leaves it `0`, which is otherwise never a real
     /// deployment's value.
     pub session_lease_ttl_ms: u64,
+    /// What a client should send to use the addressed route (issue #1210):
+    /// the matching `[[routes]] request` table, converted to JSON at config
+    /// load and handed in by reference here so quoting one costs a clone
+    /// only when there is something to clone. `None` when the route
+    /// configured none, or for a carriage addressing no configured route at
+    /// all.
+    pub request: Option<&'a serde_json::Value>,
 }
 
 /// Read a `payment-required` greeting's terms.
@@ -477,6 +572,109 @@ mod tests {
         assert_eq!(terms.pay_to(), Some("g.toon.relay"));
         assert_eq!(terms.required_transport(), None);
         assert_eq!(terms.offer().unwrap().extra.session_lease_ttl_ms, 300_000);
+    }
+
+    /// ADR 0065: a flat route's greeting is byte-identical to what it was
+    /// before schedules existed. This is the compatibility claim the record
+    /// makes, and it is the one every existing reader depends on.
+    #[test]
+    fn a_flat_routes_greeting_carries_no_slope_at_all() {
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.relay",
+            price: Price::flat(1000),
+            payload_len: 4096,
+            ..Default::default()
+        });
+        let text = String::from_utf8(body.clone()).unwrap();
+        assert!(
+            !text.contains("pricePerKib"),
+            "a flat greeting must not carry the field at all, got: {text}"
+        );
+        let terms = parse_greeting(&body).expect("well-formed");
+        // The payload length changes nothing for a flat route.
+        assert_eq!(terms.price(), Some(1000));
+        assert_eq!(terms.schedule(), Some(Price::flat(1000)));
+    }
+
+    /// Issue #1210: a route's `request` table rides at the top level of the
+    /// greeting, beside `resource` -- it describes the resource, not one of
+    /// the payment options in `accepts[]`.
+    #[test]
+    fn a_routes_request_table_rides_beside_resource() {
+        let request = serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]});
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.gas",
+            price: Price::flat(1000),
+            payload_len: 0,
+            request: Some(&request),
+            ..Default::default()
+        });
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["request"], request);
+        assert!(
+            value["accepts"][0].get("request").is_none(),
+            "request describes the resource, not a payment option"
+        );
+
+        let terms = parse_greeting(&body).expect("well-formed");
+        assert_eq!(terms.request, Some(request));
+    }
+
+    /// A route with no `request` table publishes a greeting with no
+    /// `request` key at all -- byte-identical to what it was before this
+    /// issue, and a reader written before the field existed is unaffected.
+    #[test]
+    fn a_route_with_no_request_table_greets_with_no_request_key() {
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.relay",
+            price: Price::flat(1000),
+            payload_len: 0,
+            ..Default::default()
+        });
+        let text = String::from_utf8(body).unwrap();
+        assert!(
+            !text.contains("\"request\""),
+            "a route with no request table must not carry the key at all, got: {text}"
+        );
+    }
+
+    /// A schedule route's greeting answers both questions: what THIS request
+    /// costs (`amount`), and what any request would cost (the schedule).
+    #[test]
+    fn a_schedule_greeting_quotes_this_packet_and_publishes_the_rule() {
+        let price = Price::scheduled(1000, 30);
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.ario",
+            price,
+            payload_len: 100 * 1024,
+            ..Default::default()
+        });
+        let terms = parse_greeting(&body).expect("well-formed");
+
+        // `amount` is what the greeted request costs.
+        assert_eq!(terms.price(), Some(4_000));
+        // ...and the schedule rides beside it, so a reader can price a
+        // packet it has not sent yet without greeting again. This is what
+        // keeps ADR 0011's cacheability true under a slope.
+        let schedule = terms
+            .schedule()
+            .expect("a schedule route publishes its schedule");
+        assert_eq!(schedule, price);
+        assert_eq!(schedule.charge(2 * 1024 * 1024), 62_440);
+        assert_eq!(terms.offer().unwrap().extra.price, "1000");
+        assert_eq!(
+            terms.offer().unwrap().extra.price_per_kib.as_deref(),
+            Some("30")
+        );
+    }
+
+    /// A greeting from a node that predates schedules reads back as the flat
+    /// price it is, rather than failing to parse.
+    #[test]
+    fn a_pre_schedule_greeting_reads_as_a_flat_schedule() {
+        let terms = parse_greeting(well_formed().as_bytes()).expect("well-formed");
+        assert_eq!(terms.schedule(), Some(Price::flat(1000)));
+        assert!(terms.schedule().unwrap().is_flat());
     }
 
     #[test]

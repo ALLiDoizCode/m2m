@@ -1,5 +1,7 @@
 # Claims are the source of truth; balances are a projection
 
+**Status:** Accepted, amended by [0033](0033-the-exposure-machinery-is-retired-not-restated.md). Claims-as-truth and the replayed journal stand. The exposure and ceiling arithmetic named under "Consequences" is retired — nothing projects exposure any more. The crate it names, `connector-core`, shipped as `connector-domain`.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 The connector durably persists only what is signed or otherwise irreversible — claims sent,

@@ -1,7 +1,6 @@
 //! NIP-59-inspired transport-privacy wrapping for a client-edge payment
 //! claim (`docs/protocol/client-edge-spec.md` §1.3's
-//! `ILP-Payment-Channel-Claim-Wrapped` header; `docs/mina-deployment.md`'s
-//! "Transport Privacy (NIP-59)"; issue #504). Ported from the deleted
+//! `ILP-Payment-Channel-Claim-Wrapped` header; issue #504). Ported from the deleted
 //! `packages/connector/src/settlement/privacy/nip59-claim-wrapper.ts` (git
 //! history at `c4a4ad10^`), the only prior definition of this wire format --
 //! field names, layer order and the shared-secret derivation below are

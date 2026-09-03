@@ -14,13 +14,13 @@
 //! domain the digest is computed under (ADR 0024) -- out of this registry
 //! and never out of the claim.
 //!
-//! Deliberately the same shape the peer wire already settled on:
+//! Deliberately the same shape the peer semantics already settled on:
 //! `connector_runtime::ClaimBook` keeps a `channel_id -> Address` map plus
 //! a per-channel `ChannelDomain` for exactly this reason (issue #575), and
 //! refuses a claim naming a channel it has no record of as
 //! `ClaimRejectReason::UnknownChannel`. This is that rule at the other
 //! edge, over the client edge's own claim shapes, since a client-edge
-//! claim's channel is never a peer-wire channel.
+//! claim's channel is never a peer channel.
 //!
 //! # Where a record comes from
 //!
@@ -29,9 +29,20 @@
 //! 1. **Declared** -- [`ClientChannelRegistry::record_evm`] /
 //!    [`record_solana`](ClientChannelRegistry::record_solana), which
 //!    `connector-cli` fills from the `[[client_channels]]` config section.
-//!    A node with no settlement backend at all still declares its channels
-//!    this way, and a declared channel is authoritative: it is answered
-//!    from memory and never resolved.
+//!    A declared channel is authoritative: it is answered from memory,
+//!    never resolved, and needs **no chain connection** -- this registry
+//!    holds no reference to a settlement backend and never asks one
+//!    anything about a declared row.
+//!
+//!    That is a fact about this registry, not a licence for the node
+//!    around it. Since issue #1138 a `[[client_channels]]` row is refused
+//!    at config load unless this node declares the `[settlement.<chain>]`
+//!    table of the row's own chain -- because that table is where the
+//!    node's on-chain identity comes from, and without it the node is not
+//!    a participant of the channel and could never redeem a claim on it,
+//!    however correctly declared. See
+//!    `connector_config`'s `SettlementTables` and
+//!    `docs/protocol/peer-carriage-spec.md` §11.1.
 //! 2. **Resolved from chain** -- a [`ClientChannelSource`] registered per
 //!    chain ([`ClientChannelRegistry::with_source`] for EVM,
 //!    [`ClientChannelRegistry::with_solana_source`] for Solana), asked only
@@ -82,6 +93,14 @@
 //! operator hand-declaring a channel *is* the policy decision, correctly
 //! located in config and theirs to make. An anonymous buyer resolved from
 //! chain never made any such deal, and gets the mechanism.
+//!
+//! **What that exemption is latitude over** (issue #1138, and #1136 for
+//! the domain half): how much a counterparty may spend on a channel this
+//! node *is* a participant of. It presupposes redeemability rather than
+//! conferring it, so it does not extend to the EIP-712 domain -- a fact
+//! about which contract verifies a signature -- nor to whether this node
+//! has an address on the chain at all. Both of those have exactly one
+//! right answer and are checked; only the amount is the operator's.
 //!
 //! # Caching, and how it is refreshed
 //!
@@ -396,7 +415,7 @@ impl DepositFloor {
 /// are signed over -- a `channelId` that is not a 32-byte `bytes32`, or a
 /// `channelAccount` that is not a 32-byte Solana account. Refused at
 /// registration rather than hashed or truncated into shape, matching
-/// `connector_runtime::InvalidChannelId`'s rule on the peer wire (issue
+/// `connector_runtime::InvalidChannelId`'s rule on the peer semantics (issue
 /// #575).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidChannelIdentifier(pub String);
@@ -590,12 +609,12 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
     /// The Solana twin of [`evm_channel`](Self::evm_channel) (issue #631):
     /// the counterparty's raw Ed25519 public key for the channel at
     /// `channel_account`, and their on-chain deposit, or `Ok(None)`/`Err`
-    /// under exactly the same rules. There is no domain to report alongside
-    /// it -- a Solana balance proof is signed over the channel account,
-    /// nonce and amount alone
-    /// (`connector_signer::solana_balance_proof_message`), with no
-    /// EIP-712-style verifying-contract concept to carry. The mint is not
-    /// in the signed bytes either: binding a channel to the mint this node
+    /// under exactly the same rules. The domain it reports alongside them
+    /// is the settlement program: since ADR 0053 a Solana balance proof is
+    /// signed over the program id as well as the channel account, nonce and
+    /// amount (`connector_signer::solana_balance_proof_message`), which is
+    /// this chain's answer to EIP-712's verifying contract. The mint is
+    /// still not in the signed bytes: binding a channel to the mint this node
     /// settles in is the resolving backend's job (a chain-resolved channel
     /// on any other mint must come back `Ok(None)`), not the signature's.
     async fn solana_channel(
@@ -611,7 +630,7 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
 /// without believing anything the claim says about itself: whose signature
 /// it accepts, and the EIP-712 domain (ADR 0024) that signature must have
 /// been produced under. `chain_id` and `token_network_address` are
-/// per-channel rather than node-wide for the same reason the peer wire's
+/// per-channel rather than node-wide for the same reason the peer semantics's
 /// `ChannelDomain` is (issue #566): each token gets its own `TokenNetwork`,
 /// and therefore its own `verifyingContract`, so there is no single domain
 /// a node could default to.
@@ -637,10 +656,19 @@ pub struct EvmChannel {
 /// with the counterparty through the same seam on both chains, instead of
 /// being parsed out of the chain's own bytes and then thrown away.
 ///
-/// There is no signing-domain field: a Solana balance proof is signed over
-/// the channel account, nonce and amount alone.
+/// The signing domain is `program_id` below: since ADR 0053 a Solana
+/// balance proof is signed over the settlement program as well as the
+/// channel account, nonce and amount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolanaChannel {
+    /// The settlement program this channel lives under, raw 32 bytes.
+    ///
+    /// Signed into every balance proof for this channel (ADR 0053, issue
+    /// #1082), so a signature made against one deployment does not verify
+    /// against another. Resolved from the same source as `counterparty` --
+    /// a configured row, or the chain -- and never from the claim, which
+    /// declares a `cluster` that nothing signs.
+    pub program_id: [u8; 32],
     /// The raw Ed25519 public key whose signature this connector accepts on
     /// a claim for this channel -- never the claim's own
     /// `signerPublicKey`.
@@ -680,7 +708,10 @@ pub struct ClientChannelRegistry {
     /// [`ClaimChain`] so each chain's source answers for that chain alone --
     /// never, say, an EVM source consulted for a Solana lookup. Empty is a
     /// node with no settlement backend: it accepts claims on exactly what
-    /// its config file declares, and on nothing else.
+    /// its config file declares, and on nothing else -- which since issue
+    /// #1138 is nothing at all, because a declared row needs its own
+    /// chain's `[settlement.<chain>]` table to load. A node with one
+    /// backend and not the other still lands here for the missing chain.
     sources: HashMap<ClaimChain, Arc<dyn ClientChannelSource>>,
     /// Memoised answers from [`Self::sources`], each stamped with when the
     /// chain last confirmed it -- see this module's doc for which of the
@@ -714,6 +745,24 @@ pub struct ClientChannelRegistry {
     /// the one it replaced -- it names a real outage that has nothing to do
     /// with the claim being refused.
     last_failure: RwLock<HashMap<ClaimChain, ChannelLookupFailed>>,
+    /// The Solana cluster this node's own `[settlement.solana] rpc_url`
+    /// names, when that URL names one this connector recognises (issue
+    /// #975) -- what a Solana claim's self-declared `cluster` is
+    /// cross-checked against.
+    ///
+    /// `None` covers two different nodes and refuses to distinguish them,
+    /// because neither can perform the check: one with no
+    /// `[settlement.solana]` table at all, and one whose `rpc_url` names no
+    /// cluster this connector can recognise (a third-party RPC provider's).
+    /// See [`Self::with_solana_cluster`].
+    ///
+    /// Only the cluster lives here, and deliberately. The **program id** is
+    /// not a node-wide fact a claim is checked against -- it is a
+    /// *per-channel* fact, carried on [`SolanaChannel::program_id`], and it
+    /// is what a claim's signature is actually verified under (ADR 0053).
+    /// Keeping a second, node-wide copy of it here would be a second source
+    /// of truth for a value the resolved channel already holds.
+    solana_cluster: Option<&'static str>,
 }
 
 /// A memoised resolution, when the chain last *confirmed* it, and when this
@@ -874,6 +923,7 @@ impl Default for ClientChannelRegistry {
             // channel at all, i.e. #611 switched off.
             lookup_budget: UnresolvableLookupBudget::default(),
             last_failure: RwLock::new(HashMap::new()),
+            solana_cluster: None,
         }
     }
 }
@@ -929,6 +979,15 @@ impl ClientChannelRegistry {
         self
     }
 
+    /// This registry's shaper, for the one caller outside it: `GET /ilp`'s
+    /// self-description is metered through the **same** bucket rather than a
+    /// second mechanism (ADR 0050). Sharing is deliberate -- one bucket is one
+    /// thing for an operator to size -- and it shapes rather than drops, so
+    /// the coupling costs latency and never availability.
+    pub(crate) fn lookup_budget(&self) -> &UnresolvableLookupBudget {
+        &self.lookup_budget
+    }
+
     /// How long a lookup for a channel this registry has never resolved
     /// would currently wait for its slot -- zero on a node whose discovery
     /// drain is not saturated. For a log line or a test, never for a
@@ -966,6 +1025,26 @@ impl ClientChannelRegistry {
         self
     }
 
+    /// Record the Solana cluster this node settles on (issue #975), so that
+    /// a claim declaring a *different* one is refused rather than endorsed.
+    ///
+    /// Called only when `[settlement.solana] rpc_url` names a cluster this
+    /// connector recognises -- `SolanaSettlementConfig::cluster_hint`. A
+    /// node that never calls it leaves [`Self::solana_cluster`] at `None`
+    /// and checks nothing, which is the honest answer for a node that
+    /// genuinely does not know which cluster it is on: a guess would refuse
+    /// every genuine claim it ever received.
+    pub fn with_solana_cluster(mut self, cluster: &'static str) -> ClientChannelRegistry {
+        self.solana_cluster = Some(cluster);
+        self
+    }
+
+    /// The cluster this registry knows it is on, if it knows -- see
+    /// [`Self::with_solana_cluster`].
+    pub(crate) fn solana_cluster(&self) -> Option<&'static str> {
+        self.solana_cluster
+    }
+
     /// Record `channel_id`'s counterparty and EIP-712 domain. `channel_id`
     /// is the wire shape a claim names it by -- `0x`-prefixed (or bare)
     /// 64-character hex -- and is refused as
@@ -989,14 +1068,18 @@ impl ClientChannelRegistry {
         &mut self,
         channel_account: &str,
         counterparty: &str,
+        program_id: &str,
     ) -> Result<(), InvalidChannelIdentifier> {
         let key = decode_base58_bytes::<32>(channel_account)
             .ok_or_else(|| InvalidChannelIdentifier(channel_account.to_string()))?;
         let counterparty = decode_base58_bytes::<32>(counterparty)
             .ok_or_else(|| InvalidChannelIdentifier(counterparty.to_string()))?;
+        let program_id = decode_base58_bytes::<32>(program_id)
+            .ok_or_else(|| InvalidChannelIdentifier(program_id.to_string()))?;
         self.solana.insert(
             key,
             SolanaChannel {
+                program_id,
                 counterparty,
                 // Config declares a counterparty, never an amount -- see
                 // this module's doc on the declared-channel exemption.
@@ -1728,6 +1811,7 @@ mod tests {
 
     fn solana_channel() -> SolanaChannel {
         SolanaChannel {
+            program_id: [7u8; 32],
             counterparty: [0x09; 32],
             deposit_floor: DepositFloor::AtLeast(1_000),
         }
@@ -1833,12 +1917,17 @@ mod tests {
         let account = bs58::encode([3u8; 32]).into_string();
         let counterparty = bs58::encode([7u8; 32]).into_string();
         registry
-            .record_solana(&account, &counterparty)
+            .record_solana(
+                &account,
+                &counterparty,
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            )
             .expect("a 32-byte base58 account");
 
         assert_eq!(
             registry.solana(&[3u8; 32], A_BUYER).await,
             Ok(Some(SolanaChannel {
+                program_id: [7u8; 32],
                 counterparty: [7u8; 32],
                 deposit_floor: DepositFloor::Unknown,
             }))
@@ -2084,13 +2173,18 @@ mod tests {
         let counterparty = bs58::encode([9u8; 32]).into_string();
         let mut registry = ClientChannelRegistry::new();
         registry
-            .record_solana(&account, &counterparty)
+            .record_solana(
+                &account,
+                &counterparty,
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            )
             .expect("a 32-byte base58 account");
         let registry = registry.with_solana_source(source.clone());
 
         assert_eq!(
             registry.solana(&[7u8; 32], A_BUYER).await,
             Ok(Some(SolanaChannel {
+                program_id: [7u8; 32],
                 counterparty: [9u8; 32],
                 deposit_floor: DepositFloor::Unknown,
             }))
@@ -2148,6 +2242,7 @@ mod tests {
             .record_solana(
                 &bs58::encode([3u8; 32]).into_string(),
                 &bs58::encode([7u8; 32]).into_string(),
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
             )
             .expect("a 32-byte base58 account");
 

@@ -12,7 +12,12 @@ use crate::port::{
 struct StoredChannel {
     counterparty: Vec<u8>,
     status: ChannelStatus,
-    deposited: u128,
+    /// The counterparty's own deposit -- what `redeem` is bounded by.
+    /// Raised only by [`InMemorySettlementBackend::fund_counterparty`],
+    /// never by `fund` (issue #1118).
+    counterparty_deposited: u128,
+    /// This backend's own deposit -- what `fund` raises.
+    own_deposited: u128,
     redeemed: u128,
     redeemed_nonce: u64,
     settlement_timeout: Duration,
@@ -27,7 +32,8 @@ impl StoredChannel {
             id: id.clone(),
             counterparty: self.counterparty.clone(),
             status: self.status,
-            deposited: self.deposited,
+            counterparty_deposited: self.counterparty_deposited,
+            own_deposited: self.own_deposited,
             redeemed: self.redeemed,
         }
     }
@@ -47,6 +53,30 @@ pub struct InMemorySettlementBackend {
 impl InMemorySettlementBackend {
     pub fn new() -> Self {
         InMemorySettlementBackend::default()
+    }
+
+    /// Stand in for the counterparty depositing `amount` on *their* own
+    /// side of `channel` -- the only thing that raises
+    /// [`ChannelState::counterparty_deposited`], and so the only thing
+    /// that makes a claim this backend can [`redeem`](SettlementBackend::redeem)
+    /// worth anything (issue #1118).
+    ///
+    /// Not on the [`SettlementBackend`] port, and deliberately so: on a
+    /// real chain this is the counterparty's own signed transaction from
+    /// their own wallet, which no node can perform on their behalf
+    /// (`packages/solana-program`'s `Deposit` credits strictly by signer).
+    /// This is the fake standing in for that external actor, which is
+    /// what [`crate::contract::ContractFixture::fund_counterparty`] asks
+    /// every implementation's fixture for.
+    pub async fn fund_counterparty(
+        &self,
+        channel: &ChannelId,
+        amount: u128,
+    ) -> Result<ChannelState, SettlementError> {
+        self.with_open_channel(channel, |c| {
+            c.counterparty_deposited += amount;
+            Ok(c.state(channel))
+        })
     }
 
     fn channels(&self) -> MutexGuard<'_, HashMap<ChannelId, StoredChannel>> {
@@ -104,7 +134,7 @@ impl SettlementBackend for InMemorySettlementBackend {
         settlement_timeout: Duration,
     ) -> Result<ChannelId, SettlementError> {
         // A plain decimal counter (issue #575) -- this fake's channel id
-        // doubles as the peer-wire `ClaimBook`'s channel id in this
+        // doubles as the peer-role `ClaimBook`'s channel id in this
         // workspace's own tests, which now requires a decimal or hex
         // on-chain-`bytes32`-shaped string. `EvmSettlementBackend`'s own
         // channel ids are the `0x`-prefixed hex `bytes32` `TokenNetwork`
@@ -117,7 +147,8 @@ impl SettlementBackend for InMemorySettlementBackend {
             StoredChannel {
                 counterparty,
                 status: ChannelStatus::Open,
-                deposited: 0,
+                counterparty_deposited: 0,
+                own_deposited: 0,
                 redeemed: 0,
                 redeemed_nonce: 0,
                 settlement_timeout,
@@ -133,7 +164,7 @@ impl SettlementBackend for InMemorySettlementBackend {
         amount: u128,
     ) -> Result<ChannelState, SettlementError> {
         self.with_open_channel(channel, |c| {
-            c.deposited += amount;
+            c.own_deposited += amount;
             Ok(c.state(channel))
         })
     }
@@ -150,10 +181,10 @@ impl SettlementBackend for InMemorySettlementBackend {
                     already_redeemed: c.redeemed,
                 });
             }
-            if claim.cumulative_amount > c.deposited {
+            if claim.cumulative_amount > c.counterparty_deposited {
                 return Err(SettlementError::InsufficientChannelBalance {
                     requested: claim.cumulative_amount,
-                    deposited: c.deposited,
+                    deposited: c.counterparty_deposited,
                 });
             }
             // Checked after `cumulative_amount`, not before: the two rules
@@ -218,6 +249,29 @@ impl SettlementBackend for InMemorySettlementBackend {
             .ok_or_else(|| SettlementError::ChannelNotFound(channel.clone()))?;
         Ok(stored.state(channel))
     }
+
+    /// This fake has no chain to ask, so it answers ADR 0059's question
+    /// from the only state it has: the channel it opened to that
+    /// counterparty, if one is still live.
+    ///
+    /// A scan rather than a second index keyed by counterparty, because
+    /// this is a cold-path operator question and the map is however many
+    /// channels one test opened. What it must reproduce is the *rule* --
+    /// at most one live channel per counterparty, and a settled pair
+    /// reporting none so it can start again -- which the contract suite
+    /// holds every real backend to as well.
+    async fn live_channel_with(
+        &self,
+        counterparty: Vec<u8>,
+    ) -> Result<Option<ChannelId>, SettlementError> {
+        Ok(self
+            .channels()
+            .iter()
+            .find(|(_, stored)| {
+                stored.counterparty == counterparty && stored.status != ChannelStatus::Settled
+            })
+            .map(|(id, _)| id.clone()))
+    }
 }
 
 #[cfg(test)]
@@ -243,7 +297,10 @@ mod tests {
             .open(b"counterparty-a".to_vec(), Duration::seconds(3600))
             .await
             .expect("open");
-        backend.fund(&channel, 1_000).await.expect("fund");
+        backend
+            .fund_counterparty(&channel, 1_000)
+            .await
+            .expect("the counterparty deposits what these claims draw on");
 
         backend
             .redeem(

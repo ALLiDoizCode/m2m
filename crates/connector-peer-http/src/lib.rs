@@ -6,8 +6,8 @@
 //! # What this crate is, and what it deliberately is not
 //!
 //! It is the **carriage**: where the bytes ride. It is not the semantics.
-//! Claim exchange, flush, fees, minimum delivery and the refusal taxonomy
-//! are `peer-wire-spec.md` §3--§6's and live above the
+//! Claim exchange, flush, fees and the refusal taxonomy
+//! are `peer-semantics-pre-868.md` §3--§6's and live above the
 //! [`connector_runtime::PeerTransport`] port, unchanged by which wire carried
 //! them. This crate maps §3's table onto requests and responses, and nothing
 //! else:
@@ -19,10 +19,15 @@
 //! | piggybacked claim | `ILP-Payment-Channel-Claim` request header, `base64(JSON)` |
 //! | **FLUSH** | **POST with an empty ILP body** plus the claim header -- the standalone-claim shape of `client-edge-spec.md` §1.9 step 5 |
 //! | CLAIM_ACK | `Toon-Claim-Ack` response header on the response that already answers the claim-bearing request |
-//! | `minimumDelivery` | `Toon-Minimum-Delivery` request header |
 //! | `accumulatedCost` | `Toon-Accumulated-Cost` response header, on a REJECT only |
-//! | peer credential | `Toon-Peer-Auth` request header, `base64(JSON)`, on **every** request |
 //! | flush prompt | `Toon-Flush-Requested` response header -- HTTP only, and only a hint (§6.4) |
+//!
+//! There is no row for a peer credential, and there was one: `Toon-Peer-Auth`
+//! carried a `base64({peerId, secret})` on every request. ADR 0060 deleted
+//! it -- the claim already in the table above is what proves the peering, so
+//! this carriage neither sets that header nor reads one. An arriving one is
+//! ignored rather than refused, which is what lets the two ends of a peering
+//! be upgraded in either order.
 //!
 //! **The claim header is `ILP-Payment-Channel-Claim`**, the deployed
 //! spelling. ADR 0027's table originally wrote `Payment-Channel-Claim`,
@@ -69,7 +74,8 @@
 //!    [`connector_peer_btp::claim_json`] parses the claim (I4, through the
 //!    client edge's own validator), [`connector_peer_btp::ack`] encodes and
 //!    decodes the verdict (I3, one refusal taxonomy), and
-//!    [`connector_peer_auth::decide_role`] decides role (I7). This crate
+//!    [`connector_peer_btp::role_gate::decide`] decides role (I7) -- the
+//!    same call the BTP carriage makes, over the same claim. This crate
 //!    calls them.
 //! 3. **Blur the two audiences.** The pipeline below the port is shared with
 //!    the client edge; **the admission is not**. See [`accept`] -- the devnet
@@ -85,7 +91,7 @@
 //! *semantics* that happen to have landed in #727's crate first, and I3/I4/I6
 //! require exactly one of each. Copying them here would be the drift those
 //! invariants exist to prevent; lifting them into a shared
-//! `connector-peer-wire` crate would be a better home and is mechanical, but
+//! `connector-peer-role` crate would be a better home and is mechanical, but
 //! it is a refactor of a crate that merged days ago and it changes no
 //! behaviour, so it is not done under this issue.
 //!
@@ -105,7 +111,7 @@ pub mod client;
 pub mod dial;
 pub mod headers;
 
-pub use accept::{FlushHints, PeerHttpPolicy, PeerHttpState};
+pub use accept::{claim_on, FlushHints, PeerHttpPolicy, PeerHttpState};
 pub use client::ReqwestPeerClient;
 pub use dial::{HttpDialError, HttpPeerTransport, PeerHttpClient, PeerRelation, NAT_NOTE};
 pub use headers::{Headers, PeerRequest, PeerResponse};

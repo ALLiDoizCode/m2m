@@ -38,8 +38,8 @@ jobs:
             npm --version
             gh --version | head -1
             # connector is npm-workspaces — npm (not pnpm/corepack) is the PM.
-            # mina-zkapp (o1js / bigint-buffer node-gyp) needs a C toolchain +
-            # python3; the full node:22-bookworm base already ships them.
+            # A native module (node-gyp) needs a C toolchain + python3; the
+            # full node:22-bookworm base already ships them.
             python3 --version
             g++ --version | head -1
             test "$(whoami)" = "agent"

@@ -19,11 +19,11 @@
 //!
 //! Reuses `connector_domain`'s pure nonce/watermark/value rules
 //! ([`connector_domain::validate_claim`], [`connector_domain::validate_price`],
-//! [`connector_domain::advance_watermark`]) exactly as the peer wire's own
+//! [`connector_domain::advance_watermark`]) exactly as the peer semantics's own
 //! `connector_runtime::ClaimBook` does for the first two -- this is a
 //! second *state* around the same rules, not a second set of rules. The
 //! state is deliberately separate from `ClaimBook`: a client-edge claim's
-//! channel is never a peer-wire channel, and (unlike `ClaimBook::accept_inbound`)
+//! channel is never a peer channel, and (unlike `ClaimBook::accept_inbound`)
 //! a watermark advance here is gated behind a signature verification, on the
 //! `ClientClaimGate`'s own claim-native scheme (EIP-712 for EVM, Ed25519 for
 //! Solana -- `connector_signer::claim_signature`), not `ClaimBook`'s
@@ -127,7 +127,7 @@ use chrono::{DateTime, Utc};
 
 use connector_domain::client_claim::{
     canonical_channel_key, parse_client_claim, ClientClaim, ClientClaimError, EvmClientClaim,
-    SolanaClientClaim,
+    SolanaClientClaim, EVM_NAMESPACE, SOLANA_NAMESPACE,
 };
 use connector_domain::{
     advance_watermark, validate_claim, validate_price, ClaimError, JournalEntry, Watermark,
@@ -167,7 +167,7 @@ pub enum ClaimIngestRejection {
     },
     /// The claim names a channel this connector has no counterparty
     /// recorded for (issue #558), so there is no key its signature could
-    /// be checked against. Matches the peer wire's own
+    /// be checked against. Matches the peer semantics's own
     /// `connector_runtime::ClaimRejectReason::UnknownChannel`.
     UnknownChannel,
     /// The claim names a channel a [`crate::ClientChannelSource`] has a
@@ -262,6 +262,32 @@ pub enum ClaimIngestRejection {
     NotDurable,
     WrapUnsupported,
     WrapFailed(String),
+    /// A Solana claim declares a `cluster` this node is not on (issue
+    /// #975). Checked before the claim's channel is resolved -- like
+    /// [`ClaimIngestRejection::UnknownChannel`], it is a fact this
+    /// connector already knows without spending a chain read.
+    ///
+    /// This is a refusal about the **record**, not about the money, and
+    /// that distinction is the whole of why it exists. ADR 0053 already
+    /// closed the money half: a Solana balance proof signs the settlement
+    /// program, taken from the resolved channel and never from the claim,
+    /// so a signature made for one deployment cannot be replayed against
+    /// another. What no signature can close is `cluster`, because a Solana
+    /// program cannot know which cluster it runs on and so could never
+    /// rebuild a message containing one. The field is therefore
+    /// unsignable-by-construction, declared by the payer, and -- until this
+    /// refusal -- never read. A node that accepts a claim labelled with a
+    /// chain it is not on has endorsed that label, and the payer keeps the
+    /// endorsed artifact.
+    ///
+    /// A struct variant rather than a formatted string so the two sides are
+    /// separately countable: "which cluster am I being told I am on" is a
+    /// dimension an operator wants to group by, and a metric derived from a
+    /// string is a metric derived from prose.
+    SolanaClusterMismatch {
+        declared: String,
+        configured: &'static str,
+    },
 }
 
 impl ClaimIngestRejection {
@@ -332,8 +358,28 @@ impl ClaimIngestRejection {
             ClaimIngestRejection::WrapFailed(reason) => {
                 format!("claim rejected: failed to unwrap claim: {reason}")
             }
+            ClaimIngestRejection::SolanaClusterMismatch {
+                declared,
+                configured,
+            } => format!(
+                "claim rejected: it declares cluster '{declared}', but this connector settles \
+                 on '{configured}' -- a claim naming a chain this connector is not on is wrong, \
+                 not merely unverifiable"
+            ),
         }
     }
+}
+
+/// A channel's live watermark together with the exact claim bytes that
+/// produced it (issue #1218): a watermark alone says what was spent, but
+/// only the signature is redeemable -- the same reason the peer semantics's
+/// own `connector_runtime::ClaimBook` (via `connector_domain::Projection`'s
+/// `inbound_claim_signature`) retains one alongside its watermark rather
+/// than discarding it once the acceptance decision is made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveClaim {
+    watermark: Watermark,
+    signature: Vec<u8>,
 }
 
 /// Per-channel watermark state for claims presented at the client edge,
@@ -346,13 +392,30 @@ pub struct ClientClaimGate {
     /// counterparty is configuration, not something an arriving claim may
     /// teach this connector.
     channels: ClientChannelRegistry,
-    /// The live watermarks. Every acceptance is decided, advanced *and
-    /// enqueued for journaling* under this one write lock (issue #605,
-    /// #686), so the journal's entry order and the watermark order are the
-    /// same order -- what a replay reconstructs is exactly the state this
-    /// gate held. Shared with the committer thread, which needs the same
-    /// lock to roll a failed batch's advances back.
-    watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
+    /// The live watermarks, each paired with the signature that earned it
+    /// (issue #1218). Every acceptance is decided, advanced *and enqueued
+    /// for journaling* under this one write lock (issue #605, #686), so the
+    /// journal's entry order and the watermark order are the same order --
+    /// what a replay reconstructs is exactly the state this gate held.
+    /// Shared with the committer thread, which needs the same lock to roll
+    /// a failed batch's advances back.
+    watermarks: Arc<RwLock<HashMap<String, LiveClaim>>>,
+    /// What each channel in [`Self::watermarks`] held immediately before
+    /// its *current* entry there -- i.e. exactly what [`Self::roll_back`]
+    /// restores when the packet that advanced a channel to its current
+    /// watermark turns out never to have been carried (issue #1012).
+    /// Written by [`Self::admit`] at the moment it advances a channel,
+    /// under the same write lock; consumed (and removed) by
+    /// [`Self::roll_back`]. Deliberately **not** durable and **not**
+    /// shared with [`GroupCommitter`]: a rollback is only ever attempted
+    /// within the same request that admitted the claim being rolled back
+    /// (the client edge learns the next hop's answer synchronously, before
+    /// replying), so nothing here needs to survive a restart, unlike
+    /// `GroupCommitter`'s own `previous` bookkeeping on
+    /// [`PendingAcceptance`], which undoes a *failed-durability* advance
+    /// rather than a *reported-uncarried* one and is computed fresh for
+    /// the batch it is undoing.
+    previous_watermarks: RwLock<HashMap<String, Option<LiveClaim>>>,
     /// The group-commit seam between an acceptance and its durability
     /// (issue #686): entries enqueued under the watermark lock, batched
     /// into one journal write + fsync outside it.
@@ -431,6 +494,7 @@ impl ClientClaimGate {
         Ok(ClientClaimGate {
             channels,
             watermarks,
+            previous_watermarks: RwLock::new(HashMap::new()),
             committer,
             last_claim_seen: RwLock::new(HashMap::new()),
             payout_ledger: None,
@@ -616,7 +680,42 @@ impl ClientClaimGate {
             .read()
             .expect("client claim watermarks lock poisoned")
             .get(&canonical_channel_key(channel_key))
-            .copied()
+            .map(|record| record.watermark)
+    }
+
+    /// The highest-nonce claim this gate has ever accepted on `channel_key`,
+    /// as `(nonce, cumulative_amount, signature)` -- exactly what an
+    /// on-chain redemption submits (issue #1218), mirroring
+    /// `connector_domain::Projection::latest_inbound_claim`, the peer
+    /// semantics's own equivalent read. `None` before any claim has been
+    /// accepted on this channel.
+    pub fn latest_inbound_claim(&self, channel_key: &str) -> Option<(u64, u64, Vec<u8>)> {
+        self.watermarks
+            .read()
+            .expect("client claim watermarks lock poisoned")
+            .get(&canonical_channel_key(channel_key))
+            .map(|record| {
+                (
+                    record.watermark.nonce,
+                    record.watermark.cumulative_amount,
+                    record.signature.clone(),
+                )
+            })
+    }
+
+    /// Every channel this gate has ever accepted a claim on, and that
+    /// claim's watermark (issue #1218): what `GET /claims` and
+    /// `GET /channels` need to enumerate the client-edge book, the same way
+    /// `connector_runtime::ClaimBook::views` enumerates the peer book.
+    /// Carries no signature -- nothing reads this list to redeem;
+    /// [`Self::latest_inbound_claim`] is the redeem path.
+    pub fn accepted_channels(&self) -> Vec<(String, Watermark)> {
+        self.watermarks
+            .read()
+            .expect("client claim watermarks lock poisoned")
+            .iter()
+            .map(|(channel_id, record)| (channel_id.clone(), record.watermark))
+            .collect()
     }
 
     /// The registry of channels this gate accepts a claim on -- their
@@ -627,6 +726,14 @@ impl ClientClaimGate {
     /// threaded through separately).
     pub(crate) fn channels(&self) -> &ClientChannelRegistry {
         &self.channels
+    }
+
+    /// The shaper this node's chain lookups are already metered by
+    /// ([`crate::lookup_budget`]), for the one other caller ADR 0050 gives it:
+    /// `GET /ilp`'s self-description is rate-limited *through this bucket*
+    /// rather than through a second mechanism of its own.
+    pub(crate) fn lookup_budget(&self) -> &crate::lookup_budget::UnresolvableLookupBudget {
+        self.channels.lookup_budget()
     }
 
     /// What this connector has separately committed to pay EVM channel
@@ -769,7 +876,11 @@ impl ClientClaimGate {
                 .watermarks
                 .read()
                 .expect("client claim watermarks lock poisoned");
-            check_freshness_and_value(watermarks.get(&key).copied(), &claim, price)?;
+            check_freshness_and_value(
+                watermarks.get(&key).map(|record| record.watermark),
+                &claim,
+                price,
+            )?;
         }
 
         // Who a lookup for a channel this connector has never resolved is
@@ -804,7 +915,11 @@ impl ClientClaimGate {
         // claim on this same channel may have advanced the watermark while
         // the channel lookup was in flight, and accepting both would be
         // exactly the replay this gate exists to refuse.
-        check_freshness_and_value(watermarks.get(&key).copied(), &claim, price)?;
+        check_freshness_and_value(
+            watermarks.get(&key).map(|record| record.watermark),
+            &claim,
+            price,
+        )?;
 
         // Advance and enqueue under the same write lock the authoritative
         // re-check was decided under (ADR 0005, issue #605, #686): the
@@ -816,12 +931,15 @@ impl ClientClaimGate {
         // only once it has, so nothing is visible-before-durable at any
         // boundary that renders service.
         // The signature is retained rather than discarded for the same
-        // reason the peer wire retains it (issue #425): a watermark says
+        // reason the peer semantics retains it (issue #425): a watermark says
         // what was spent, but only the claim itself is redeemable.
-        let previous = watermarks.get(&key).copied();
+        let previous = watermarks.get(&key).cloned();
         watermarks.insert(
             key.clone(),
-            advance_watermark(claim.nonce(), claim.transferred_amount()),
+            LiveClaim {
+                watermark: advance_watermark(claim.nonce(), claim.transferred_amount()),
+                signature: verified.signature.clone(),
+            },
         );
         let ticket = match self.committer.enqueue(PendingAcceptance {
             entry: JournalEntry::InboundClaimAccepted {
@@ -831,9 +949,20 @@ impl ClientClaimGate {
                 signature: verified.signature,
             },
             channel_key: key.clone(),
-            previous,
+            previous: previous.clone(),
         }) {
-            Ok(ticket) => ticket,
+            Ok(ticket) => {
+                // Recorded only now the advance is actually queued for the
+                // journal (issue #1012): `Self::roll_back` restores exactly
+                // this value, so it must agree with what `previous` on the
+                // `PendingAcceptance` above would also restore on a failed
+                // batch.
+                self.previous_watermarks
+                    .write()
+                    .expect("client claim previous-watermark lock poisoned")
+                    .insert(key.clone(), previous);
+                ticket
+            }
             Err(CommitterGone) => {
                 // The committer thread is gone -- nothing will ever fsync
                 // this entry. Undo the advance while still holding the
@@ -852,6 +981,263 @@ impl ClientClaimGate {
 
         Ok((claim, ticket))
     }
+
+    /// Undo [`Self::admit`]'s watermark advance for the claim that reached
+    /// exactly `nonce`/`cumulative_amount` on `channel_key` -- because the
+    /// PREPARE it covered is now known never to have been carried across a
+    /// forwarded route (issue #1012, ADR 0028): the client edge admits the
+    /// client's claim before learning whether the next hop will fulfil it,
+    /// and the next hop's own terminal reject (F06 after a covered retry,
+    /// T01 unreachable) is discoverable only after that admission --
+    /// unlike the cases [`crate::Connector::cover_forward`] (or an
+    /// equivalent pre-admission check) can already predict before this
+    /// gate is ever consulted, this is the seam for the ones it cannot.
+    ///
+    /// A no-op -- correctly, not a bug -- in two cases:
+    ///
+    /// * a later claim has since advanced `channel_key` past
+    ///   `nonce`/`cumulative_amount`. That claim's own admission is
+    ///   unrelated to this reject, and unwinding it here would erase state
+    ///   this call has no business touching, so it is left alone -- this
+    ///   call only ever acts while the claim it names is still the
+    ///   channel's current watermark.
+    /// * this gate holds no [`Self::previous_watermarks`] record for
+    ///   `channel_key`. Every call this connector itself makes provides
+    ///   one -- `admit` records it at the exact moment it advances the
+    ///   channel -- so this can only be reached by a rollback attempted
+    ///   outside the request that admitted the claim, which nothing in
+    ///   this codebase does (see the field's own doc for why that is safe
+    ///   to assume).
+    ///
+    /// Durable exactly like `admit`'s own advance: the in-memory watermark
+    /// moves and the entry is enqueued under the same write lock every
+    /// acceptance is decided under, and this call does not resolve until
+    /// the committer reports it fsync'd -- a rollback a restart could
+    /// forget would leave the client durably charged for a packet this
+    /// connector itself decided not to count.
+    pub(crate) async fn roll_back(
+        &self,
+        channel_key: &str,
+        nonce: u64,
+        cumulative_amount: u64,
+    ) -> Result<(), ClaimIngestRejection> {
+        let key = canonical_channel_key(channel_key);
+        let ticket = {
+            let mut watermarks = self
+                .watermarks
+                .write()
+                .expect("client claim watermarks lock poisoned");
+            let current = watermarks.get(&key).cloned();
+            if current.as_ref().map(|record| record.watermark)
+                != Some(Watermark {
+                    nonce,
+                    cumulative_amount,
+                })
+            {
+                return Ok(());
+            }
+            let mut previous_watermarks = self
+                .previous_watermarks
+                .write()
+                .expect("client claim previous-watermark lock poisoned");
+            let Some(previous) = previous_watermarks.remove(&key) else {
+                tracing::warn!(
+                    channel = %key,
+                    "asked to roll back a claim this gate has no prior watermark recorded \
+                     for; leaving it charged rather than guessing"
+                );
+                return Ok(());
+            };
+            let entry = match &previous {
+                Some(record) => JournalEntry::InboundClaimRolledBack {
+                    channel_id: key.clone(),
+                    nonce: record.watermark.nonce,
+                    cumulative_amount: record.watermark.cumulative_amount,
+                },
+                None => JournalEntry::InboundClaimWatermarkReset {
+                    channel_id: key.clone(),
+                },
+            };
+            restore_watermark(&mut watermarks, &key, previous.clone());
+            match self.committer.enqueue(PendingAcceptance {
+                entry,
+                channel_key: key.clone(),
+                previous: current.clone(),
+            }) {
+                Ok(ticket) => ticket,
+                Err(CommitterGone) => {
+                    restore_watermark(&mut watermarks, &key, current);
+                    previous_watermarks.insert(key.clone(), previous);
+                    tracing::error!(
+                        channel = %key,
+                        "could not durably record a claim rollback: the journal committer \
+                         is gone"
+                    );
+                    return Err(ClaimIngestRejection::NotDurable);
+                }
+            }
+        };
+        ticket.durable().await
+    }
+
+    /// Reset `channel_key`'s watermark, durably (issue #977): the next
+    /// claim on this channel is judged as if this gate had never accepted
+    /// one. Only ever called once this gate itself -- never a caller's
+    /// guess -- has confirmed the chain no longer vouches for the channel;
+    /// see [`Self::reap_unresolvable_channels`], its only caller.
+    ///
+    /// A no-op, durably nothing written, when this channel has no
+    /// watermark to reset -- most channels, most of the time, and not
+    /// worth an idle journal entry.
+    ///
+    /// Durability follows exactly [`Self::admit`]'s own discipline: the
+    /// reset is enqueued under the same write lock every acceptance is
+    /// decided under, so it can never race a concurrent claim's advance on
+    /// the same channel, and this call does not resolve until the
+    /// committer reports it fsync'd -- a reset a restart could forget is
+    /// worse than no reset at all, since it would silently re-arm the
+    /// double-charge this issue exists to close.
+    async fn reset_watermark(&self, channel_key: &str) -> Result<(), ClaimIngestRejection> {
+        let key = canonical_channel_key(channel_key);
+        // Scoped so the write guard provably ends here, before this
+        // function's one await below -- `std::sync::RwLockWriteGuard` is
+        // not `Send`, and this method is awaited from a spawned,
+        // multi-threaded task (`ClientClaimGate::reap_unresolvable_channels`),
+        // unlike `Self::admit`'s identical-shaped lock use, which never has
+        // an await left in its own body once the guard drops.
+        let ticket = {
+            let mut watermarks = self
+                .watermarks
+                .write()
+                .expect("client claim watermarks lock poisoned");
+            let Some(previous) = watermarks.remove(&key) else {
+                return Ok(());
+            };
+            match self.committer.enqueue(PendingAcceptance {
+                entry: JournalEntry::InboundClaimWatermarkReset {
+                    channel_id: key.clone(),
+                },
+                channel_key: key.clone(),
+                previous: Some(previous.clone()),
+            }) {
+                Ok(ticket) => ticket,
+                Err(CommitterGone) => {
+                    restore_watermark(&mut watermarks, &key, Some(previous));
+                    tracing::error!(
+                        channel = %key,
+                        "could not durably record a watermark reset: the journal committer is gone"
+                    );
+                    return Err(ClaimIngestRejection::NotDurable);
+                }
+            }
+        };
+        ticket.durable().await
+    }
+
+    /// Sweep every channel this gate currently holds a watermark for, and
+    /// reset any the chain no longer vouches for -- settled, deallocated,
+    /// or otherwise gone (issue #977).
+    ///
+    /// This is the fix's proactive half, and it has to be: a reopened
+    /// channel's first claim after settlement fails this gate's freshness
+    /// check (its nonce cannot advance the stale watermark left over from
+    /// the settled incarnation) *before* [`Self::admit`] ever resolves the
+    /// channel again -- [`check_freshness_and_value`] runs first and is
+    /// pure, deliberately spending no chain read on a claim that looks
+    /// like a replay (issue #544's ordering). So nothing on the claim path
+    /// can ever observe a reopen; only a check that runs independently of
+    /// claim traffic can.
+    ///
+    /// Declared channels ([`ClientChannelRegistry::record_evm`]/
+    /// [`record_solana`](ClientChannelRegistry::record_solana)) are
+    /// untouched: `refresh_evm`/`refresh_solana` answer them from config,
+    /// never the chain, by design -- an operator who hand-declares a
+    /// channel is expected to also manage its lifecycle by hand, the same
+    /// exemption issue #646 already carves out for a declared channel's
+    /// collateral cap.
+    ///
+    /// Every re-read goes through [`ClientChannelRegistry::refresh_evm`]/
+    /// [`refresh_solana`](ClientChannelRegistry::refresh_solana) -- the
+    /// exact same rate-limited, budgeted path [`check_collateral`] already
+    /// uses on a deposit-floor breach -- so a sweep costs at most one chain
+    /// read per channel per `min_reattempt_interval`, never a burst, and
+    /// never touches a channel this gate has no watermark for at all (an
+    /// unpaid or never-resolved channel has nothing here worth protecting).
+    ///
+    /// Best-effort throughout: a lookup failure (an unreachable endpoint,
+    /// say) answers neither `Ok(None)` nor
+    /// [`ChannelResolutionError::Terminal`], so it is left alone rather
+    /// than treated as gone, and a reset that could not be made durable is
+    /// logged and skipped -- one bad channel or one journal hiccup must
+    /// not stall every other channel's sweep or crash the loop that calls
+    /// this repeatedly.
+    pub async fn reap_unresolvable_channels(&self) {
+        let keys: Vec<String> = self
+            .watermarks
+            .read()
+            .expect("client claim watermarks lock poisoned")
+            .keys()
+            .cloned()
+            .collect();
+        for key in keys {
+            if self.channel_is_gone(&key).await {
+                tracing::warn!(
+                    channel = %key,
+                    "resetting this channel's watermark: the chain no longer vouches for it \
+                     (settled, deallocated, or otherwise gone) -- a reopened channel starts \
+                     clean rather than inheriting its predecessor's spend"
+                );
+                if let Err(error) = self.reset_watermark(&key).await {
+                    tracing::error!(
+                        channel = %key,
+                        ?error,
+                        "could not durably reset this channel's watermark; will retry it on the \
+                         next sweep"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Whether `key` -- an already-canonical channel key -- currently
+    /// resolves to nothing this connector can be paid on, per
+    /// [`Self::reap_unresolvable_channels`]'s own rules for what counts.
+    /// Split out so that function reads as the sweep it is, not the two
+    /// chains' decoding.
+    ///
+    /// A key this cannot take apart -- an unknown namespace, or an
+    /// identifier that does not decode to its chain's 32 bytes -- is
+    /// answered `false`, the same "leave it alone" a failed lookup gets:
+    /// nothing here may reset a watermark on anything but a chain's own
+    /// answer.
+    async fn channel_is_gone(&self, key: &str) -> bool {
+        let requester = format!("sweep:{key}");
+        // Split on the namespace exactly as `canonical_channel_key` does,
+        // since that is the function whose output this is taking apart.
+        match key.split_once(':') {
+            Some((EVM_NAMESPACE, channel_id)) => {
+                let Some(channel_id) = decode_hex_bytes::<32>(channel_id) else {
+                    return false;
+                };
+                matches!(
+                    self.channels.refresh_evm(&channel_id, &requester).await,
+                    Ok(None) | Err(ChannelResolutionError::Terminal(_))
+                )
+            }
+            Some((SOLANA_NAMESPACE, channel_account)) => {
+                let Some(channel_account) = decode_base58_bytes::<32>(channel_account) else {
+                    return false;
+                };
+                matches!(
+                    self.channels
+                        .refresh_solana(&channel_account, &requester)
+                        .await,
+                    Ok(None) | Err(ChannelResolutionError::Terminal(_))
+                )
+            }
+            _ => false,
+        }
+    }
 }
 
 /// The most entries one journal batch carries -- a bound on the buffer a
@@ -868,7 +1254,7 @@ const GROUP_COMMIT_MAX_BATCH: usize = 4096;
 struct PendingAcceptance {
     entry: JournalEntry,
     channel_key: String,
-    previous: Option<Watermark>,
+    previous: Option<LiveClaim>,
 }
 
 /// The committer thread has exited, so nothing will ever journal this
@@ -937,7 +1323,7 @@ struct GroupCommitter {
 impl GroupCommitter {
     fn spawn(
         journal: Arc<dyn Journal>,
-        watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
+        watermarks: Arc<RwLock<HashMap<String, LiveClaim>>>,
     ) -> GroupCommitter {
         let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new()
@@ -970,7 +1356,7 @@ type QueuedAcceptance = (
 fn group_commit_loop(
     receiver: mpsc::Receiver<QueuedAcceptance>,
     journal: Arc<dyn Journal>,
-    watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
+    watermarks: Arc<RwLock<HashMap<String, LiveClaim>>>,
 ) {
     while let Ok(first) = receiver.recv() {
         let mut batch = vec![first];
@@ -1020,7 +1406,7 @@ fn group_commit_loop(
                             restore_watermark(
                                 &mut watermarks,
                                 &pending.channel_key,
-                                pending.previous,
+                                pending.previous.clone(),
                             );
                         }
                     }
@@ -1036,13 +1422,13 @@ fn group_commit_loop(
 /// Put `channel_key` back to `previous` -- the inverse of one watermark
 /// advance, used only to unwind acceptances whose durable record failed.
 fn restore_watermark(
-    watermarks: &mut HashMap<String, Watermark>,
+    watermarks: &mut HashMap<String, LiveClaim>,
     channel_key: &str,
-    previous: Option<Watermark>,
+    previous: Option<LiveClaim>,
 ) {
     match previous {
-        Some(watermark) => {
-            watermarks.insert(channel_key.to_string(), watermark);
+        Some(record) => {
+            watermarks.insert(channel_key.to_string(), record);
         }
         None => {
             watermarks.remove(channel_key);
@@ -1082,9 +1468,9 @@ fn check_freshness_and_value(
 /// Rebuild the per-channel watermarks a journal records, folding every
 /// [`JournalEntry::InboundClaimAccepted`] in it -- the client edge's own
 /// half of the replay `connector_runtime::ClaimBook::set_journal` does for
-/// the peer wire, over the same entry.
+/// the peer semantics, over the same entry.
 ///
-/// Componentwise `max` rather than last-wins, unlike the peer wire's fold:
+/// Componentwise `max` rather than last-wins, unlike the peer semantics's fold:
 /// entries are appended in accepted order and each accepted claim strictly
 /// advances, so the two agree on any journal this gate itself wrote. They
 /// differ only on a journal that has been reordered or spliced, and there
@@ -1093,7 +1479,7 @@ fn check_freshness_and_value(
 /// is the one failure this whole mechanism exists to prevent.
 ///
 /// Entries of other kinds are ignored rather than refused: the entry
-/// alphabet is shared with the peer wire, and this gate is only the
+/// alphabet is shared with the peer semantics, and this gate is only the
 /// authority on the ones it writes.
 ///
 /// **Every key is canonicalised as it is folded** (issue #643), which is
@@ -1113,28 +1499,87 @@ fn check_freshness_and_value(
 /// collapse into one key at the highest nonce and amount either of them
 /// ever reached, so the upgrade can only ever tighten what this gate will
 /// accept next, never loosen it.
-fn replay_watermarks(entries: &[JournalEntry]) -> HashMap<String, Watermark> {
-    let mut watermarks: HashMap<String, Watermark> = HashMap::new();
+///
+/// **Signature retention (issue #1218).** Each channel's fold keeps a
+/// stack of every [`LiveClaim`] it has pushed, not just the current one:
+/// [`JournalEntry::InboundClaimRolledBack`] carries the watermark it
+/// restores but -- unlike [`JournalEntry::InboundClaimAccepted`] -- no
+/// signature, so the only place that signature still exists once the
+/// rollback that undid its claim has been folded is the entry *before* it
+/// in this same stack. `Self::roll_back` (this gate's only writer of that
+/// entry kind) always journals it immediately after the acceptance it
+/// undoes, so popping the stack recovers exactly the claim being restored
+/// to, without needing to trust the rollback entry's own nonce/amount as
+/// anything more than a diagnostic. A reset clears the whole stack: it
+/// erases the channel outright rather than restoring an earlier claim.
+fn replay_watermarks(entries: &[JournalEntry]) -> HashMap<String, LiveClaim> {
+    let mut history: HashMap<String, Vec<LiveClaim>> = HashMap::new();
     for entry in entries {
-        let JournalEntry::InboundClaimAccepted {
-            channel_id,
-            nonce,
-            cumulative_amount,
-            ..
-        } = entry
-        else {
-            continue;
-        };
-        let watermark = watermarks
-            .entry(canonical_channel_key(channel_id))
-            .or_insert(Watermark {
-                nonce: 0,
-                cumulative_amount: 0,
-            });
-        watermark.nonce = watermark.nonce.max(*nonce);
-        watermark.cumulative_amount = watermark.cumulative_amount.max(*cumulative_amount);
+        match entry {
+            JournalEntry::InboundClaimAccepted {
+                channel_id,
+                nonce,
+                cumulative_amount,
+                signature,
+            } => {
+                let stack = history
+                    .entry(canonical_channel_key(channel_id))
+                    .or_default();
+                let previous = stack
+                    .last()
+                    .map(|record| record.watermark)
+                    .unwrap_or(Watermark {
+                        nonce: 0,
+                        cumulative_amount: 0,
+                    });
+                stack.push(LiveClaim {
+                    watermark: Watermark {
+                        nonce: previous.nonce.max(*nonce),
+                        cumulative_amount: previous.cumulative_amount.max(*cumulative_amount),
+                    },
+                    signature: signature.clone(),
+                });
+            }
+            // Issue #977: a channel's deterministic on-chain address means
+            // a reopened channel reuses its settled predecessor's key, so a
+            // reset must be able to erase what was folded in *before* it in
+            // this same replay, not merely refuse to add anything new.
+            // Entries are folded in the order they were appended
+            // (`Journal::read_all`), so clearing the whole stack here and
+            // letting a later `InboundClaimAccepted` start a fresh one is
+            // exactly "this channel's watermark starts clean again from
+            // this point on" -- the same effect the reset had when it was
+            // first accepted, reproduced on every replay.
+            JournalEntry::InboundClaimWatermarkReset { channel_id } => {
+                history.remove(&canonical_channel_key(channel_id));
+            }
+            // Issue #1012: a rollback exists precisely to move a
+            // watermark DOWN, which componentwise `max` above would
+            // silently undo -- so, like the reset above, this SETS the
+            // channel's watermark directly rather than folding into it, by
+            // popping the accepted claim it undoes off this channel's
+            // stack. Sound for the same reason: `Self::roll_back` only
+            // ever writes this entry immediately after the
+            // `InboundClaimAccepted` it undoes, so replay sees the two in
+            // the same order they were decided in, and the entry left on
+            // top of the stack afterward is exactly the claim being
+            // restored to.
+            JournalEntry::InboundClaimRolledBack { channel_id, .. } => {
+                let key = canonical_channel_key(channel_id);
+                if let Some(stack) = history.get_mut(&key) {
+                    stack.pop();
+                    if stack.is_empty() {
+                        history.remove(&key);
+                    }
+                }
+            }
+            _ => continue,
+        }
     }
-    watermarks
+    history
+        .into_iter()
+        .filter_map(|(key, mut stack)| stack.pop().map(|record| (key, record)))
+        .collect()
 }
 
 /// Verify a claim's signature against the counterparty `channels` records
@@ -1381,6 +1826,59 @@ async fn verify_evm_claim_signature(
     }
 }
 
+/// Cross-check a Solana claim's self-declared `cluster` against the cluster
+/// this node actually settles on (issue #975).
+///
+/// # Why this field, and only this field
+///
+/// A Solana claim declares two things about where it lives: `programId` and
+/// `cluster`. They are not the same kind of fact, and only one of them
+/// needs checking here.
+///
+/// `programId` is **signed over** since ADR 0053. The verifier rebuilds the
+/// balance-proof message from the *resolved channel's* program id, never
+/// from the claim, so a claim whose signature verifies is a claim its payer
+/// signed for this node's program whatever its `programId` field says. What
+/// the payer must write there is pinned (`client-edge-spec.md` §1.3: the
+/// settlement program the `channelAccount` lives under), but the field grants
+/// nothing and gates nothing, so a disagreement is handled as a warning at
+/// the point where the authoritative value is in scope -- see
+/// [`verify_solana_claim_signature`], which also records why it is not yet a
+/// refusal.
+///
+/// `cluster` can never be signed over. A Solana program knows its own id
+/// but has no way to learn which cluster it is running on, so it could not
+/// rebuild a message containing one -- ADR 0053 says exactly this, and it
+/// is why the cluster stayed out of the signed bytes. The field is
+/// unsignable by construction, supplied by the payer, and this off-chain
+/// comparison against the node's own configuration is the only check it can
+/// ever get.
+///
+/// # When it passes without comparing
+///
+/// `Ok(())` when there is nothing to disagree with, which is two cases:
+/// the claim omits the optional `cluster` and so declares nothing, or
+/// `configured` is `None` because this node cannot tell which cluster it is
+/// on (no `[settlement.solana]` table, or an `rpc_url` naming no cluster
+/// this connector recognises -- a third-party RPC provider's, say). Passing
+/// in the second case is deliberate: the alternative is guessing, and a
+/// wrong guess refuses every genuine claim the node ever receives.
+fn check_solana_cluster(
+    configured: Option<&'static str>,
+    claim: &SolanaClientClaim,
+) -> Result<(), ClaimIngestRejection> {
+    let (Some(declared), Some(configured)) = (&claim.cluster, configured) else {
+        return Ok(());
+    };
+    if declared != configured {
+        return Err(ClaimIngestRejection::SolanaClusterMismatch {
+            declared: declared.clone(),
+            configured,
+        });
+    }
+    Ok(())
+}
+
 async fn verify_solana_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &SolanaClientClaim,
@@ -1393,6 +1891,12 @@ async fn verify_solana_claim_signature(
     let Some(channel_account) = decode_base58_bytes::<32>(&claim.channel_account) else {
         return Err(ClaimIngestRejection::UnknownChannel);
     };
+
+    // Before spending a lookup on the claim's channel (issue #975): like
+    // the decode above, a disagreement here is a fact this connector
+    // already knows without a chain read.
+    check_solana_cluster(channels.solana_cluster(), claim)?;
+
     // Declared, or -- for a channel nothing declared -- resolved from the
     // chain via a registered `ClaimChain::Solana` source (issue #631).
     let channel = match channels.solana(&channel_account, requester).await {
@@ -1416,6 +1920,48 @@ async fn verify_solana_claim_signature(
         }
     };
 
+    // The claim's own `programId`, against the program its channel actually
+    // lives under (issue #975). Said out loud, and deliberately *not* a
+    // refusal.
+    //
+    // What the field must carry is now pinned: the settlement program the
+    // `channelAccount` lives under (`client-edge-spec.md` §1.3), which is
+    // the same 32 bytes ADR 0053 binds into the signed balance proof, and
+    // the committed wire vector `peer_carriage.claim_solana` demonstrates it
+    // (issue #1127, `schema_version` 2).
+    //
+    // Still not a refusal, and the reason has moved. It is no longer "the
+    // contract does not say"; it is that the contract said something else
+    // until now. The vector declared the *system program* here for its whole
+    // life, so a payer that conformed to the published contract is sending a
+    // value this comparison rejects, and a connector cannot see which payers
+    // those are -- the client edge is where buyers it has never heard of
+    // arrive. Refusing would also refuse money it can actually collect: the
+    // signature below is verified against `channel.program_id`, so a claim
+    // that survives this function is one whose payer signed for this node's
+    // program whatever they wrote in this field.
+    //
+    // Promotion is therefore gated on adoption, not on this repository:
+    // issue #1127 step 4, once payers are known to emit the pinned value.
+    // Landing it before then is the ADR 0041 failure shape -- one change
+    // taking the whole devnet Solana paid-write path dark at the moment the
+    // tag moves.
+    //
+    // Warned about because issue #975's real complaint is that a
+    // disagreement between a claim's label and the chain it was paid on is
+    // invisible to both parties -- "the payer sees a FULFILL, the operator
+    // sees nothing at all". This is the operator seeing something, and it is
+    // also how an operator learns whether their own payers have adopted.
+    if decode_base58_bytes::<32>(&claim.program_id) != Some(channel.program_id) {
+        tracing::warn!(
+            channel_account = %claim.channel_account,
+            declared_program_id = %claim.program_id,
+            "a client claim declares a programId that is not the program its channel lives \
+             under; accepting it on the strength of its signature, which is checked against \
+             the channel's own program (ADR 0053)"
+        );
+    }
+
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
     let Ok(signature) = BASE64.decode(&claim.signature) else {
@@ -1423,6 +1969,7 @@ async fn verify_solana_claim_signature(
     };
 
     if verify_solana_balance_proof(
+        &channel.program_id,
         &channel_account,
         claim.nonce,
         claim.transferred_amount,
@@ -1452,6 +1999,10 @@ mod tests {
     const EVM_CHAIN_ID: u64 = 8453;
     const EVM_TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
     const SOLANA_CHANNEL_ACCOUNT: [u8; 32] = [3u8; 32];
+    /// The settlement program [`test_channels`]'s Solana channel lives
+    /// under, and therefore the program every genuine claim below signs
+    /// (ADR 0053). Base58 `US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx`.
+    const SOLANA_CHANNEL_PROGRAM_ID: [u8; 32] = [7u8; 32];
 
     fn hex_encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -1482,6 +2033,7 @@ mod tests {
             .record_solana(
                 &base58_encode(&SOLANA_CHANNEL_ACCOUNT),
                 &base58_encode(&solana_signer().public.to_bytes()),
+                &base58_encode(&SOLANA_CHANNEL_PROGRAM_ID),
             )
             .expect("a 32-byte base58 channel account");
         channels
@@ -1640,6 +2192,52 @@ mod tests {
         let gate = gate();
         let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0).await;
         assert!(result.is_ok());
+    }
+
+    /// Issue #1218: once a claim is accepted, its nonce, cumulative amount
+    /// and signature are readable back off the gate -- exactly what the
+    /// operator surface's `GET /claims` and `redeem-latest` need, and what
+    /// this gate could not previously answer at all.
+    #[tokio::test]
+    async fn an_accepted_claims_nonce_amount_and_signature_are_readable_back() {
+        let gate = gate();
+        let channel = channel_id();
+        gate.ingest(&evm_claim_json(&channel, 1, 100), 0)
+            .await
+            .expect("claim accepted");
+
+        let (nonce, cumulative_amount, signature) = gate
+            .latest_inbound_claim(&format!("evm:{channel}"))
+            .expect("an accepted claim is redeemable");
+        assert_eq!(nonce, 1);
+        assert_eq!(cumulative_amount, 100);
+        assert_eq!(
+            signature.len(),
+            65,
+            "the raw 65-byte EIP-712 signature, not its hex text"
+        );
+
+        let channels = gate.accepted_channels();
+        assert_eq!(
+            channels,
+            vec![(
+                format!("evm:{channel}"),
+                Watermark {
+                    nonce: 1,
+                    cumulative_amount: 100
+                }
+            )]
+        );
+    }
+
+    /// A channel this gate has never accepted a claim on has nothing to
+    /// redeem -- distinguishing "never claimed" from "claimed for zero" is
+    /// exactly what `Option::None` here is for.
+    #[tokio::test]
+    async fn a_channel_never_claimed_on_has_no_latest_inbound_claim() {
+        let gate = gate();
+        assert_eq!(gate.latest_inbound_claim("evm:0xnotachannel"), None);
+        assert!(gate.accepted_channels().is_empty());
     }
 
     #[tokio::test]
@@ -2258,8 +2856,41 @@ mod tests {
         bs58::encode(bytes).into_string()
     }
 
+    /// A Solana claim on [`test_channels`]'s channel, declaring the program
+    /// that channel really lives under -- what a conforming payer sends
+    /// (`client-edge-spec.md` §1.3: `programId` names the settlement program
+    /// the `channelAccount` lives under).
+    ///
+    /// It declared the **system program** until issue #1127, matching the
+    /// committed wire vector, so every test built on it quietly exercised a
+    /// mismatch. The mismatch is worth exercising -- it is
+    /// [`a_solana_claim_declaring_a_foreign_program_is_accepted_on_its_signature`]
+    /// -- but a test that means to exercise something else should not be
+    /// carrying it by accident, and a fixture is the closest thing this crate
+    /// has to a statement of what a real payer's claim looks like.
     fn solana_claim_json_with(
         channel_account: &str,
+        nonce: u64,
+        transferred_amount: u64,
+        signature_base64: &str,
+        signer_public_key: &str,
+    ) -> String {
+        solana_claim_json_declaring(
+            channel_account,
+            &base58_encode(&SOLANA_CHANNEL_PROGRAM_ID),
+            nonce,
+            transferred_amount,
+            signature_base64,
+            signer_public_key,
+        )
+    }
+
+    /// [`solana_claim_json_with`] with the declared `programId` spelled out
+    /// by the caller -- for the one test whose subject *is* a claim declaring
+    /// a program its channel does not live under.
+    fn solana_claim_json_declaring(
+        channel_account: &str,
+        program_id: &str,
         nonce: u64,
         transferred_amount: u64,
         signature_base64: &str,
@@ -2272,7 +2903,7 @@ mod tests {
                 "messageId": "msg-{nonce}",
                 "timestamp": "2026-02-02T12:00:00.000Z",
                 "senderId": "peer-carol",
-                "programId": "11111111111111111111111111111111",
+                "programId": "{program_id}",
                 "channelAccount": "{channel_account}",
                 "nonce": {nonce},
                 "transferredAmount": "{transferred_amount}",
@@ -2293,6 +2924,7 @@ mod tests {
 
         let keypair = solana_signer();
         let message = connector_signer::solana_balance_proof_message(
+            &[7u8; 32],
             channel_account_bytes,
             nonce,
             transferred_amount,
@@ -2304,6 +2936,57 @@ mod tests {
             transferred_amount,
             &BASE64.encode(signature.to_bytes()),
             &base58_encode(&keypair.public.to_bytes()),
+        )
+    }
+
+    /// [`genuine_solana_claim_json`], carrying an explicit `cluster` -- the
+    /// field issue #975 is about. The signature is produced exactly as the
+    /// genuine helper produces it, over
+    /// [`SOLANA_CHANNEL_PROGRAM_ID`]/account/nonce/amount, because
+    /// `cluster` is not in the signed bytes and cannot be: a claim declaring
+    /// the wrong cluster is a *genuine* claim wearing a wrong label, which
+    /// is the only case worth testing.
+    fn genuine_solana_claim_json_with_cluster(
+        channel_account_bytes: &[u8; 32],
+        nonce: u64,
+        transferred_amount: u64,
+        cluster: Option<&str>,
+    ) -> String {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use ed25519_dalek::Signer as Ed25519Signer;
+
+        let keypair = solana_signer();
+        let message = connector_signer::solana_balance_proof_message(
+            &SOLANA_CHANNEL_PROGRAM_ID,
+            channel_account_bytes,
+            nonce,
+            transferred_amount,
+        );
+        let signature = keypair.sign(&message);
+        let cluster_field = match cluster {
+            Some(cluster) => format!(r#", "cluster": "{cluster}""#),
+            None => String::new(),
+        };
+        format!(
+            r#"{{
+                "version": "1.0",
+                "blockchain": "solana",
+                "messageId": "msg-{nonce}",
+                "timestamp": "2026-02-02T12:00:00.000Z",
+                "senderId": "peer-carol",
+                "programId": "{}",
+                "channelAccount": "{}",
+                "nonce": {nonce},
+                "transferredAmount": "{transferred_amount}",
+                "signature": "{}",
+                "signerPublicKey": "{}"
+                {cluster_field}
+            }}"#,
+            base58_encode(&SOLANA_CHANNEL_PROGRAM_ID),
+            base58_encode(channel_account_bytes),
+            BASE64.encode(signature.to_bytes()),
+            base58_encode(&keypair.public.to_bytes()),
         )
     }
 
@@ -2334,8 +3017,12 @@ mod tests {
             solana_signer().public.to_bytes(),
             "the forger must not accidentally be the counterparty"
         );
-        let message =
-            connector_signer::solana_balance_proof_message(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
+        let message = connector_signer::solana_balance_proof_message(
+            &[7u8; 32],
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+        );
         let signature = forger.sign(&message);
 
         let claim = solana_claim_json_with(
@@ -2376,8 +3063,12 @@ mod tests {
 
         let gate = gate();
         let signer = solana_signer();
-        let message =
-            connector_signer::solana_balance_proof_message(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
+        let message = connector_signer::solana_balance_proof_message(
+            &[7u8; 32],
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+        );
         let signature = signer.sign(&message);
 
         let claim = solana_claim_json_with(
@@ -2399,8 +3090,12 @@ mod tests {
 
         let gate = gate();
         let keypair = solana_signer();
-        let message =
-            connector_signer::solana_balance_proof_message(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
+        let message = connector_signer::solana_balance_proof_message(
+            &[7u8; 32],
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+        );
         let mut signature_bytes = keypair.sign(&message).to_bytes();
         signature_bytes[0] ^= 0xff;
 
@@ -2414,6 +3109,193 @@ mod tests {
 
         let result = gate.ingest(&claim, 0).await;
         assert_eq!(result, Err(ClaimIngestRejection::SignatureInvalid));
+    }
+
+    // -- Declared cluster: a claim's `cluster` vs. the one this node
+    // -- actually settles on (issue #975) --
+
+    /// A gate over [`test_channels`] that also knows which cluster it is on
+    /// -- the shape `connector-cli` builds when `[settlement.solana]
+    /// rpc_url` names a cluster it recognises.
+    fn gate_on_cluster(cluster: &'static str) -> ClientClaimGate {
+        gate_over(test_channels().with_solana_cluster(cluster))
+    }
+
+    /// Issue #975's defect, at the layer that can see it: a genuinely
+    /// signed claim, on a channel this node vouches for, whose body
+    /// declares a cluster this node is not on. Before this check the node
+    /// accepted it in full and advanced the watermark -- "the payer sees a
+    /// FULFILL, the operator sees nothing at all".
+    ///
+    /// The signature is genuine and stays genuine: `cluster` is not in the
+    /// signed bytes and cannot be (a Solana program cannot know its own
+    /// cluster), which is exactly why an off-chain comparison is the only
+    /// check this field can ever get.
+    #[tokio::test]
+    async fn a_solana_claim_declaring_a_cluster_this_node_is_not_on_is_refused() {
+        let gate = gate_on_cluster("devnet");
+        let claim = genuine_solana_claim_json_with_cluster(
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+            Some("mainnet-beta"),
+        );
+        assert_eq!(
+            gate.ingest(&claim, 0).await,
+            Err(ClaimIngestRejection::SolanaClusterMismatch {
+                declared: "mainnet-beta".to_string(),
+                configured: "devnet",
+            })
+        );
+    }
+
+    /// Refusing changes nothing that outlives the request: the watermark
+    /// does not move, so the payer who fixes their label is good again at
+    /// the same nonce. Asserted because a refusal that silently consumed a
+    /// nonce would turn a mislabelled claim into a lost one.
+    #[tokio::test]
+    async fn a_cluster_mismatch_consumes_no_nonce() {
+        let gate = gate_on_cluster("devnet");
+        let mislabelled = genuine_solana_claim_json_with_cluster(
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+            Some("testnet"),
+        );
+        assert!(gate.ingest(&mislabelled, 0).await.is_err());
+
+        let corrected =
+            genuine_solana_claim_json_with_cluster(&SOLANA_CHANNEL_ACCOUNT, 1, 100, Some("devnet"));
+        assert!(
+            gate.ingest(&corrected, 0).await.is_ok(),
+            "the same nonce must still be good once the label is corrected"
+        );
+    }
+
+    /// The agreeing case: same cluster, accepted exactly as before.
+    #[tokio::test]
+    async fn a_solana_claim_declaring_the_cluster_this_node_is_on_is_accepted() {
+        let gate = gate_on_cluster("devnet");
+        let claim =
+            genuine_solana_claim_json_with_cluster(&SOLANA_CHANNEL_ACCOUNT, 1, 100, Some("devnet"));
+        assert!(gate.ingest(&claim, 0).await.is_ok());
+    }
+
+    /// `cluster` is optional (client-edge-spec.md §1.3), and the committed
+    /// wire vector `peer_carriage.claim_solana` omits it. A claim that
+    /// declares nothing disagrees with nothing, so a spec-conformant client
+    /// is untouched by this check.
+    #[tokio::test]
+    async fn a_solana_claim_that_declares_no_cluster_is_accepted() {
+        let gate = gate_on_cluster("devnet");
+        let claim = genuine_solana_claim_json_with_cluster(&SOLANA_CHANNEL_ACCOUNT, 1, 100, None);
+        assert!(gate.ingest(&claim, 0).await.is_ok());
+    }
+
+    /// A node that cannot tell which cluster it is on -- no
+    /// `[settlement.solana]`, or an `rpc_url` naming no cluster this
+    /// connector recognises -- compares nothing and accepts whatever is
+    /// declared. Deliberate: the alternative is guessing, and a wrong guess
+    /// refuses every genuine claim the node ever receives.
+    #[tokio::test]
+    async fn a_node_that_does_not_know_its_cluster_checks_nothing() {
+        let gate = gate();
+        let claim = genuine_solana_claim_json_with_cluster(
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+            Some("mainnet-beta"),
+        );
+        assert!(gate.ingest(&claim, 0).await.is_ok());
+    }
+
+    /// The `programId` half of issue #975, and the reason it is a warning
+    /// rather than a refusal: this claim declares a program that is *not*
+    /// the one its channel lives under, and it is accepted -- because its
+    /// signature is verified against the channel's program (ADR 0053), so
+    /// the claim is cryptographically correct and fully redeemable however
+    /// its label reads. Refusing it would refuse money this node can collect.
+    ///
+    /// The mismatch is built here on purpose. It used to be inherited from
+    /// `genuine_solana_claim_json`'s own body, which declared the system
+    /// program exactly as the committed wire vector did -- so every Solana
+    /// test in this file was silently a mismatch test, and this one proved
+    /// nothing the others did not. Issue #1127 pinned what `programId` must
+    /// carry and fixed both fixtures; what survives is this, the deliberate
+    /// case, with the divergence written down where a reader can see it.
+    ///
+    /// Note what is *not* asserted: that the claim goes through **silently**.
+    /// It does not -- `verify_solana_claim_signature` logs a `warn` naming
+    /// the channel and the declared value, which is the whole of issue #975's
+    /// "the operator sees nothing at all".
+    #[tokio::test]
+    async fn a_solana_claim_declaring_a_foreign_program_is_accepted_on_its_signature() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use ed25519_dalek::Signer as Ed25519Signer;
+
+        // The system program: 32 zero bytes, owning no channel anywhere, and
+        // the value this repository's own contract fixture declared until
+        // issue #1127 -- so it is the value a payer built against that
+        // contract is most likely to still be sending.
+        const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
+        assert_ne!(
+            decode_base58_bytes::<32>(SYSTEM_PROGRAM),
+            Some(SOLANA_CHANNEL_PROGRAM_ID),
+            "this test is vacuous unless the declared and actual programs really differ"
+        );
+
+        // Signed under the channel's *real* program, as ADR 0053 requires --
+        // only the declared label is wrong. A claim signed under the foreign
+        // program would be refused as `SignatureInvalid`, which is a
+        // different fact and already has its own test.
+        let keypair = solana_signer();
+        let signature = keypair.sign(&connector_signer::solana_balance_proof_message(
+            &SOLANA_CHANNEL_PROGRAM_ID,
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+        ));
+        let claim = solana_claim_json_declaring(
+            &base58_encode(&SOLANA_CHANNEL_ACCOUNT),
+            SYSTEM_PROGRAM,
+            1,
+            100,
+            &BASE64.encode(signature.to_bytes()),
+            &base58_encode(&keypair.public.to_bytes()),
+        );
+
+        let gate = gate();
+        assert!(gate.ingest(&claim, 0).await.is_ok());
+    }
+
+    /// The conforming case, which nothing pinned before issue #1127: a claim
+    /// declaring the program its channel really lives under is accepted, and
+    /// [`solana_claim_json_with`] -- the fixture behind most of the Solana
+    /// tests in this file -- is that claim.
+    ///
+    /// This is not a duplicate of `a_genuine_solana_signature_is_accepted`.
+    /// That test would pass with any `programId` at all; this one fails if
+    /// the fixture ever drifts back to declaring something the channel does
+    /// not live under, which is what makes the fixture a statement about the
+    /// wire rather than an accident.
+    #[tokio::test]
+    async fn the_solana_fixture_declares_the_program_its_channel_lives_under() {
+        let claim = genuine_solana_claim_json(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
+        let declared = serde_json::from_str::<serde_json::Value>(&claim)
+            .expect("the fixture is valid JSON")["programId"]
+            .as_str()
+            .expect("a Solana claim declares a programId")
+            .to_string();
+        assert_eq!(
+            decode_base58_bytes::<32>(&declared),
+            Some(SOLANA_CHANNEL_PROGRAM_ID),
+            "a conforming claim declares the settlement program its channelAccount lives under \
+             (client-edge-spec.md §1.3)"
+        );
+
+        let gate = gate();
+        assert!(gate.ingest(&claim, 0).await.is_ok());
     }
 
     // -- Collateral binding: the cap at the on-chain deposit (issue #646) --
@@ -2748,6 +3630,7 @@ mod tests {
             let source = Arc::new(FakeSolanaChannelSource::knowing(vec![(
                 account,
                 SolanaChannel {
+                    program_id: [7u8; 32],
                     counterparty: solana_signer().public.to_bytes(),
                     deposit_floor: DepositFloor::AtLeast(0),
                 },
@@ -2772,6 +3655,7 @@ mod tests {
             source.now_says(
                 account,
                 Some(SolanaChannel {
+                    program_id: [7u8; 32],
                     counterparty: solana_signer().public.to_bytes(),
                     deposit_floor: DepositFloor::AtLeast(6_000),
                 }),
@@ -2819,6 +3703,318 @@ mod tests {
                     .await,
                 Err(ClaimIngestRejection::UnknownChannel),
                 "a claim on a settled channel can never be redeemed, so it buys nothing"
+            );
+        }
+    }
+
+    // -- Issue #977: a reopened channel must not inherit its settled
+    // predecessor's watermark -- neither charging its payer twice for
+    // units already settled on chain, nor becoming permanently unusable. --
+    mod reopen {
+        use super::*;
+        use crate::channels::test_source::FakeSolanaChannelSource;
+        use crate::channels::{ChannelLivenessPolicy, DepositFloor, SolanaChannel};
+        use std::time::Duration;
+
+        /// The default liveness policy with the re-attempt interval
+        /// removed, matching `collateral::unsuppressed` -- these tests
+        /// drive `reap_unresolvable_channels`'s own chain re-read directly
+        /// and must not have it suppressed by the interval a real sweep
+        /// relies on to bound its own cost.
+        fn unsuppressed() -> ChannelLivenessPolicy {
+            ChannelLivenessPolicy {
+                min_reattempt_interval: Duration::ZERO,
+                ..ChannelLivenessPolicy::default()
+            }
+        }
+
+        /// A gate over a chain-resolved (never declared) Solana channel --
+        /// the shape #977 was observed on, and the one a declared
+        /// `[[client_channels]]` record cannot express (it has no chain to
+        /// notice a settle on at all, see [`ClientClaimGate::channel_is_gone`]'s
+        /// own doc).
+        fn chain_resolved_solana(
+            account: [u8; 32],
+            counterparty: [u8; 32],
+            deposit: u64,
+        ) -> (Arc<FakeSolanaChannelSource>, ClientClaimGate) {
+            let source = Arc::new(FakeSolanaChannelSource::knowing(vec![(
+                account,
+                SolanaChannel {
+                    program_id: [7u8; 32],
+                    counterparty,
+                    deposit_floor: DepositFloor::AtLeast(deposit),
+                },
+            )]));
+            let gate = gate_over(
+                ClientChannelRegistry::new()
+                    .with_solana_source(source.clone())
+                    .with_liveness_policy(unsuppressed()),
+            );
+            (source, gate)
+        }
+
+        /// The bug end to end: a channel is spent down, settles (the
+        /// resolver now answers "not a channel this connector can be paid
+        /// on", exactly [`crate::channels::test_source::FakeSolanaChannelSource::now_says`]
+        /// with `None` -- the same answer a genuinely deallocated Solana
+        /// account produces), and reopens at the identical, deterministic
+        /// address with a fresh deposit. Reopening it before this gate's
+        /// sweep has ever caught the settled channel gone reproduces the
+        /// issue exactly: the first claim on the reincarnation -- nonce 1,
+        /// a small amount -- collides with the stale watermark the settled
+        /// incarnation left behind. A sweep that runs *while the chain
+        /// still reports the channel gone* -- the realistic case, since
+        /// settling and reopening a channel is a slow, deliberate on-chain
+        /// act -- resets it before that claim ever arrives.
+        #[tokio::test]
+        async fn a_sweep_lets_a_reopened_channel_be_paid_on_again() {
+            let account = [0x55u8; 32];
+            let counterparty = solana_signer().public.to_bytes();
+            let (source, gate) = chain_resolved_solana(account, counterparty, 5_000_000);
+
+            gate.ingest(&genuine_solana_claim_json(&account, 1, 1_000), 0)
+                .await
+                .expect("the original incarnation accepts its first claim");
+
+            // Settled and deallocated: the chain no longer vouches for this
+            // address at all. The sweep runs while this is still true --
+            // exactly the case `reap_unresolvable_channels`'s own doc names
+            // as what a sweep can actually observe, unlike the claim path.
+            source.now_says(account, None);
+            gate.reap_unresolvable_channels().await;
+
+            // Only now does the channel reopen at the identical address,
+            // funded again.
+            source.now_says(
+                account,
+                Some(SolanaChannel {
+                    program_id: [7u8; 32],
+                    counterparty,
+                    deposit_floor: DepositFloor::AtLeast(5_000_000),
+                }),
+            );
+
+            assert!(
+                gate.ingest(&genuine_solana_claim_json(&account, 1, 100), 0)
+                    .await
+                    .is_ok(),
+                "the sweep already reset the stale watermark before the reopen, so the \
+                 reincarnation's own first claim is judged as fresh, not as a replay of its \
+                 predecessor's"
+            );
+        }
+
+        /// The failure mode the issue calls unbounded: a channel spent to
+        /// exactly its deposit, then reopened with the same deposit, has no
+        /// nonce that can ever satisfy both "greater than the watermark"
+        /// and "within collateral" -- permanently unusable without a reset.
+        #[tokio::test]
+        async fn a_channel_spent_to_its_deposit_and_reopened_is_not_permanently_unusable() {
+            let account = [0x56u8; 32];
+            let counterparty = solana_signer().public.to_bytes();
+            let (source, gate) = chain_resolved_solana(account, counterparty, 5_000_000);
+
+            gate.ingest(&genuine_solana_claim_json(&account, 9, 5_000_000), 0)
+                .await
+                .expect("spent to exactly the deposit");
+
+            // No nonce could ever satisfy both "> the old watermark's
+            // 5,000,000" and "<= the reopened channel's own 5,000,000
+            // deposit" -- every claim the reincarnation's payer could ever
+            // sign would be refused, one way or the other, without a sweep
+            // to reset the watermark while the settle is still observable.
+            source.now_says(account, None);
+            gate.reap_unresolvable_channels().await;
+
+            source.now_says(
+                account,
+                Some(SolanaChannel {
+                    program_id: [7u8; 32],
+                    counterparty,
+                    deposit_floor: DepositFloor::AtLeast(5_000_000),
+                }),
+            );
+
+            assert!(
+                gate.ingest(&genuine_solana_claim_json(&account, 1, 5_000_000), 0)
+                    .await
+                    .is_ok(),
+                "the reincarnation can spend its own full deposit once the sweep has reset \
+                 the predecessor's watermark"
+            );
+        }
+
+        /// The sweep must not perturb a channel that is still genuinely
+        /// live: its watermark is untouched, and a real replay on it is
+        /// still refused after the sweep runs.
+        #[tokio::test]
+        async fn a_sweep_leaves_a_still_live_channels_watermark_alone() {
+            let account = [0x57u8; 32];
+            let counterparty = solana_signer().public.to_bytes();
+            let (_source, gate) = chain_resolved_solana(account, counterparty, 5_000_000);
+
+            gate.ingest(&genuine_solana_claim_json(&account, 3, 3_000), 0)
+                .await
+                .expect("a live channel accepts its claim");
+
+            gate.reap_unresolvable_channels().await;
+
+            assert_eq!(
+                gate.ingest(&genuine_solana_claim_json(&account, 3, 3_000), 0)
+                    .await,
+                Err(ClaimIngestRejection::NonceNotAdvancing),
+                "sweeping a channel the chain still vouches for must not reset it"
+            );
+        }
+
+        /// A declared channel ([`ClientChannelRegistry::record_solana`]) has
+        /// no chain source to notice a settle on at all -- `refresh_solana`
+        /// answers it from config, unconditionally -- so the sweep is
+        /// always a no-op for one, by construction rather than by the fake
+        /// source's own behaviour.
+        #[tokio::test]
+        async fn a_sweep_never_resets_a_declared_channels_watermark() {
+            let gate = gate();
+            let channel = channel_id();
+
+            gate.ingest(&evm_claim_json(&channel, 5, 500), 0)
+                .await
+                .expect("a declared channel accepts its claim");
+
+            gate.reap_unresolvable_channels().await;
+
+            assert_eq!(
+                gate.ingest(&evm_claim_json(&channel, 5, 999), 0).await,
+                Err(ClaimIngestRejection::NonceNotAdvancing),
+                "a declared channel's watermark is config-scoped and must survive a sweep"
+            );
+        }
+
+        /// [`chain_resolved_solana`]'s EVM twin, over
+        /// [`unrecorded_channel_id`] -- a channel resolved from the chain
+        /// rather than declared.
+        fn chain_resolved_evm(deposit: u64) -> (Arc<FakeChannelSource>, ClientClaimGate) {
+            let (_secret, address) = evm_signer();
+            let source = Arc::new(FakeChannelSource::knowing(vec![(
+                resolved_evm_channel_id(),
+                EvmChannel {
+                    counterparty: address,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    deposit_floor: DepositFloor::AtLeast(deposit),
+                },
+            )]));
+            let gate = gate_over(
+                ClientChannelRegistry::new()
+                    .with_source(source.clone())
+                    .with_liveness_policy(unsuppressed()),
+            );
+            (source, gate)
+        }
+
+        fn resolved_evm_channel_id() -> [u8; 32] {
+            decode_hex_bytes::<32>(&unrecorded_channel_id()).expect("a valid test channel id")
+        }
+
+        /// The issue's own "Note on scope": it was observed on Solana, but
+        /// an EVM `channelId` is derived rather than random too, so the
+        /// same reopen collides there and the sweep has to cover both
+        /// chains rather than the one it was reported on.
+        #[tokio::test]
+        async fn a_sweep_lets_a_reopened_evm_channel_be_paid_on_again() {
+            let channel = unrecorded_channel_id();
+            let (source, gate) = chain_resolved_evm(5_000_000);
+            let (_secret, counterparty) = evm_signer();
+
+            gate.ingest(&evm_claim_json(&channel, 9, 5_000_000), 0)
+                .await
+                .expect("the original incarnation spends its whole deposit");
+
+            source.now_says(resolved_evm_channel_id(), None);
+            gate.reap_unresolvable_channels().await;
+
+            source.now_says(
+                resolved_evm_channel_id(),
+                Some(EvmChannel {
+                    counterparty,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    deposit_floor: DepositFloor::AtLeast(5_000_000),
+                }),
+            );
+
+            assert!(
+                gate.ingest(&evm_claim_json(&channel, 1, 100), 0)
+                    .await
+                    .is_ok(),
+                "an EVM channel reopened at its own derived id is judged from a clean \
+                 watermark, exactly as the Solana one is"
+            );
+        }
+
+        /// The reset survives a restart (issue #605's own durability
+        /// discipline, extended to this new entry kind): a second gate
+        /// replaying the same journal file recovers the reset, not the
+        /// stale predecessor watermark it erased.
+        #[tokio::test]
+        async fn the_reset_a_sweep_makes_survives_a_restart() {
+            use connector_runtime::FileJournal;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("client-edge-claims.log");
+            let account = [0x58u8; 32];
+            let counterparty = solana_signer().public.to_bytes();
+            let source = Arc::new(FakeSolanaChannelSource::knowing(vec![(
+                account,
+                SolanaChannel {
+                    program_id: [7u8; 32],
+                    counterparty,
+                    deposit_floor: DepositFloor::AtLeast(5_000_000),
+                },
+            )]));
+            let registry = || {
+                ClientChannelRegistry::new()
+                    .with_solana_source(source.clone())
+                    .with_liveness_policy(unsuppressed())
+            };
+
+            {
+                let gate = ClientClaimGate::restore(
+                    registry(),
+                    Arc::new(FileJournal::open(&path).expect("open the journal file")),
+                )
+                .expect("replay the journal");
+                gate.ingest(&genuine_solana_claim_json(&account, 1, 1_000), 0)
+                    .await
+                    .expect("the original incarnation accepts its first claim");
+                source.now_says(account, None);
+                gate.reap_unresolvable_channels().await;
+                source.now_says(
+                    account,
+                    Some(SolanaChannel {
+                        program_id: [7u8; 32],
+                        counterparty,
+                        deposit_floor: DepositFloor::AtLeast(5_000_000),
+                    }),
+                );
+            }
+
+            // A second gate over the same journal file: a restarted
+            // process, reading the same durable state off the same disk.
+            let restarted = ClientClaimGate::restore(
+                registry(),
+                Arc::new(FileJournal::open(&path).expect("open the journal file")),
+            )
+            .expect("replay the journal");
+
+            assert!(
+                restarted
+                    .ingest(&genuine_solana_claim_json(&account, 1, 100), 0)
+                    .await
+                    .is_ok(),
+                "the reset the sweep made before the restart must still hold after it -- a \
+                 restart must not resurrect the settled predecessor's watermark"
             );
         }
     }
@@ -3915,7 +5111,7 @@ mod tests {
         }
 
         /// A journal entry whose channel is in no namespace this build
-        /// canonicalises -- the peer wire shares the entry alphabet -- is
+        /// canonicalises -- the peer role shares the entry alphabet -- is
         /// folded byte for byte. Canonicalisation must never invent a
         /// channel out of a key it does not recognise.
         #[test]
@@ -3928,8 +5124,8 @@ mod tests {
             }]);
 
             assert_eq!(
-                replayed.get("channel-a"),
-                Some(&Watermark {
+                replayed.get("channel-a").map(|record| record.watermark),
+                Some(Watermark {
                     nonce: 3,
                     cumulative_amount: 30
                 })
@@ -4174,7 +5370,7 @@ mod tests {
 
             let watermarks = replay_watermarks(&entries);
             assert_eq!(
-                watermarks.get("evm:0xabc").copied(),
+                watermarks.get("evm:0xabc").map(|record| record.watermark),
                 Some(Watermark {
                     nonce: 7,
                     cumulative_amount: 700
@@ -4182,7 +5378,7 @@ mod tests {
             );
         }
 
-        /// Entries the peer wire writes share this journal's alphabet but
+        /// Entries the peer role writes share this journal's alphabet but
         /// not this gate's authority: replaying them must not invent a
         /// client-edge watermark out of an outbound claim or a fulfilment.
         #[test]
@@ -4201,6 +5397,237 @@ mod tests {
             ];
 
             assert!(replay_watermarks(&entries).is_empty());
+        }
+
+        /// Issue #977: a reset entry erases everything folded in for that
+        /// channel *before* it in the same replay, and a later accepted
+        /// entry re-accumulates from zero rather than from what the reset
+        /// erased -- exactly the effect [`ClientClaimGate::reap_unresolvable_channels`]
+        /// has live, reproduced on every replay.
+        #[test]
+        fn replay_watermarks_clears_prior_accumulation_on_a_reset_entry() {
+            let entries = vec![
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "solana:abc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 5_000_000,
+                    signature: vec![1],
+                },
+                JournalEntry::InboundClaimWatermarkReset {
+                    channel_id: "solana:abc".to_string(),
+                },
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "solana:abc".to_string(),
+                    nonce: 1,
+                    cumulative_amount: 100,
+                    signature: vec![2],
+                },
+            ];
+
+            let watermarks = replay_watermarks(&entries);
+            assert_eq!(
+                watermarks.get("solana:abc").map(|record| record.watermark),
+                Some(Watermark {
+                    nonce: 1,
+                    cumulative_amount: 100
+                }),
+                "the post-reset claim's own nonce/amount, not a max against the erased \
+                 pre-reset accumulation"
+            );
+        }
+
+        /// A reset with nothing accepted after it leaves the channel with
+        /// no watermark at all -- the state a never-before-seen channel is
+        /// in, which is exactly what a reopened channel's first claim must
+        /// be judged against.
+        #[test]
+        fn replay_watermarks_a_reset_with_nothing_after_it_leaves_no_watermark() {
+            let entries = vec![
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "solana:abc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 5_000_000,
+                    signature: vec![1],
+                },
+                JournalEntry::InboundClaimWatermarkReset {
+                    channel_id: "solana:abc".to_string(),
+                },
+            ];
+
+            assert!(!replay_watermarks(&entries).contains_key("solana:abc"));
+        }
+
+        /// Issue #1012: a rollback entry SETS the channel's watermark back
+        /// to the value it names rather than folding into it by
+        /// componentwise `max`, which -- the fold every accepted claim uses
+        /// -- would silently undo the very thing the entry records.
+        #[test]
+        fn replay_watermarks_puts_a_rolled_back_channel_back_to_the_named_watermark() {
+            let entries = vec![
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                    signature: vec![1],
+                },
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 10,
+                    cumulative_amount: 1_000,
+                    signature: vec![2],
+                },
+                JournalEntry::InboundClaimRolledBack {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                },
+            ];
+
+            assert_eq!(
+                replay_watermarks(&entries)
+                    .get("evm:0xabc")
+                    .map(|record| record.watermark),
+                Some(Watermark {
+                    nonce: 9,
+                    cumulative_amount: 900
+                }),
+                "the rolled-back value, not the `max` of it and the claim it undoes"
+            );
+        }
+
+        /// The rollback restores not just the prior watermark but the
+        /// prior claim's own signature -- the whole point of #1218 -- since
+        /// the entry that undid the second claim carries no signature of
+        /// its own to fall back to.
+        #[test]
+        fn replay_watermarks_puts_a_rolled_back_channel_back_to_the_named_signature() {
+            let entries = vec![
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                    signature: vec![1],
+                },
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 10,
+                    cumulative_amount: 1_000,
+                    signature: vec![2],
+                },
+                JournalEntry::InboundClaimRolledBack {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                },
+            ];
+
+            assert_eq!(
+                replay_watermarks(&entries)
+                    .get("evm:0xabc")
+                    .map(|record| record.signature.clone()),
+                Some(vec![1]),
+                "the first claim's own signature, not the second claim's -- the second's \
+                 acceptance was undone by the rollback"
+            );
+        }
+
+        /// The other half of the same rule: the claim the client resubmits
+        /// after a rollback advances the channel again, from the restored
+        /// watermark.
+        #[test]
+        fn replay_watermarks_advances_again_after_a_rollback() {
+            let entries = vec![
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 10,
+                    cumulative_amount: 1_000,
+                    signature: vec![1],
+                },
+                JournalEntry::InboundClaimRolledBack {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                },
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 10,
+                    cumulative_amount: 1_000,
+                    signature: vec![2],
+                },
+            ];
+
+            assert_eq!(
+                replay_watermarks(&entries)
+                    .get("evm:0xabc")
+                    .map(|record| record.watermark),
+                Some(Watermark {
+                    nonce: 10,
+                    cumulative_amount: 1_000
+                })
+            );
+        }
+
+        /// Issue #1012, end to end through the gate rather than through
+        /// `replay_watermarks` alone: a rollback is durable, so a restart
+        /// recovers the pre-claim watermark and judges the resubmitted
+        /// claim as fresh. A rollback a restart could forget would leave
+        /// the client durably charged for a packet this connector decided
+        /// not to count.
+        #[tokio::test]
+        async fn a_rolled_back_claim_is_forgotten_across_a_restart() {
+            let key = format!("evm:{}", channel_id());
+            let journal = Arc::new(InMemoryJournal::new());
+            let gate = ClientClaimGate::restore(test_channels(), journal.clone())
+                .expect("nothing to replay");
+            gate.ingest(&evm_claim_json(&channel_id(), 3, 300), 0)
+                .await
+                .expect("accepted");
+            gate.roll_back(&key, 3, 300)
+                .await
+                .expect("the rollback is durably recorded");
+
+            assert_eq!(gate.watermark(&key), None);
+            let restarted = ClientClaimGate::restore(test_channels(), journal)
+                .expect("the journal replays, rollback and all");
+            assert_eq!(
+                restarted.watermark(&key),
+                None,
+                "the rollback survived the restart"
+            );
+            restarted
+                .ingest(&evm_claim_json(&channel_id(), 3, 300), 0)
+                .await
+                .expect("the identical claim is judged as fresh as it was the first time");
+        }
+
+        /// Issue #1012's first documented no-op: a rollback naming a claim
+        /// a later one has already superseded leaves the channel exactly
+        /// where that later claim put it. Unwinding it would erase state
+        /// the reject that provoked this call has nothing to do with.
+        #[tokio::test]
+        async fn rolling_back_a_superseded_claim_leaves_the_later_one_alone() {
+            let key = format!("evm:{}", channel_id());
+            let journal = Arc::new(InMemoryJournal::new());
+            let gate =
+                ClientClaimGate::restore(test_channels(), journal).expect("nothing to replay");
+            gate.ingest(&evm_claim_json(&channel_id(), 3, 300), 0)
+                .await
+                .expect("accepted");
+            gate.ingest(&evm_claim_json(&channel_id(), 4, 400), 0)
+                .await
+                .expect("accepted");
+
+            gate.roll_back(&key, 3, 300)
+                .await
+                .expect("a no-op is not an error");
+
+            assert_eq!(
+                gate.watermark(&key),
+                Some(Watermark {
+                    nonce: 4,
+                    cumulative_amount: 400
+                })
+            );
         }
 
         /// The journal keeps the claim itself, not merely its watermark:

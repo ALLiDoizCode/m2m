@@ -36,12 +36,13 @@
 //! (`RejectCode::t01_peer_unreachable`), never `F02`.
 //!
 //! **Charging.** Unchanged: both ingresses (`lib.rs`'s `POST /ilp`,
-//! `btp.rs`'s BTP carriage) already compute `price` from
-//! `Connector::app_route` and admit any claim against it before routing is
-//! attempted at all. A destination this arm ever delivers through has, by
-//! construction, no matching app route -- one that did would already have
-//! answered non-`F02` above and never reached here -- so `price` is `0` on
-//! every real deployment today, and a `T01` this arm answers keeps nothing,
+//! `btp.rs`'s BTP carriage) already compute the `charge` from
+//! `Connector::app_route` -- since ADR 0065 by evaluating that route's price
+//! schedule at this packet's own payload length -- and admit any claim
+//! against it before routing is attempted at all. A destination this arm ever
+//! delivers through has, by construction, no matching app route -- one that
+//! did would already have answered non-`F02` above and never reached here --
+//! so the `charge` is `0` on every real deployment today, and a `T01` this arm answers keeps nothing,
 //! exactly like `Connector::deliver_to_app`'s own `AppOutcome::Unreachable`.
 
 use connector_btp::{BtpFrame, BTP_RESPONSE};
@@ -56,9 +57,10 @@ use crate::ClientEdgeState;
 /// Route `prepare` through `state`: a configured route (app/peer/leased)
 /// first, and -- only if that answers `F02` -- whatever client session
 /// [`crate::session_registry::SessionRegistry`] currently has bound to its
-/// destination. `price` is the same figure both ingresses already computed
-/// from `Connector::app_route` before admitting any claim; it is only
-/// consulted here to price a mismatched fulfilment the same way a
+/// destination. `charge` is the same figure both ingresses already computed
+/// from `Connector::app_route` before admitting any claim -- that route's
+/// price schedule at this packet's own payload length (ADR 0065) -- and it is
+/// only consulted here to price a mismatched fulfilment the same way a
 /// terminated app route's own would be (issue #736's charging AC).
 ///
 /// **Issue #770.** A genuine fulfilment from a client session means that
@@ -78,7 +80,7 @@ use crate::ClientEdgeState;
 pub(crate) async fn route_prepare(
     state: &ClientEdgeState,
     prepare: Prepare,
-    price: u64,
+    charge: u64,
     client_channel_id: Option<&str>,
 ) -> PacketResponse {
     let now = crate::now_unix();
@@ -88,7 +90,7 @@ pub(crate) async fn route_prepare(
         // stands unchanged.
         return state
             .connector
-            .handle_prepare_with_client_channel(prepare, 0, client_channel_id)
+            .handle_prepare_with_client_channel(prepare, client_channel_id)
             .await;
     };
 
@@ -113,7 +115,7 @@ pub(crate) async fn route_prepare(
     let encoded = prepare.encode();
     let response = state
         .connector
-        .handle_prepare_with_client_channel(prepare, 0, client_channel_id)
+        .handle_prepare_with_client_channel(prepare, client_channel_id)
         .await;
     if !is_unreachable(&response) {
         // A configured route decided this packet -- never silently
@@ -126,7 +128,7 @@ pub(crate) async fn route_prepare(
         .deliver(&destination, Some(lease.generation), &[], &encoded, now)
         .await
     {
-        Ok(frame) => session_answer(frame, &condition, price),
+        Ok(frame) => session_answer(frame, &condition, charge),
         Err(reject) => return PacketResponse::Reject(reject),
     };
 
@@ -275,9 +277,9 @@ fn is_unreachable(response: &PacketResponse) -> bool {
 /// exactly as untrusted as a peer is. A REJECT the session raised itself
 /// rides home unchanged. Content this carriage cannot decode as either is
 /// treated as unreachable (`T01`), the same as no answer at all.
-fn session_answer(frame: BtpFrame, condition: &[u8; 32], price: u64) -> PacketResponse {
+fn session_answer(frame: BtpFrame, condition: &[u8; 32], charge: u64) -> PacketResponse {
     if let Ok(fulfill) = Fulfill::decode(&frame.ilp_packet) {
-        return accept_if_fulfilled(condition, fulfill, price);
+        return accept_if_fulfilled(condition, fulfill, charge);
     }
     match Reject::decode(&frame.ilp_packet) {
         Ok(reject) => PacketResponse::Reject(reject),
@@ -292,7 +294,7 @@ fn session_answer(frame: BtpFrame, condition: &[u8; 32], price: u64) -> PacketRe
 fn accept_if_fulfilled(
     condition: &[u8; 32],
     candidate: Fulfill,
-    price_on_reject: u64,
+    charge_on_reject: u64,
 ) -> PacketResponse {
     if fulfillment_matches_condition(condition, &candidate.fulfillment) {
         PacketResponse::Fulfill(candidate)
@@ -302,7 +304,7 @@ fn accept_if_fulfilled(
             triggered_by: String::new(),
             message: "fulfillment does not match execution condition".to_string(),
             data: Vec::new(),
-            accumulated_cost: price_on_reject,
+            accumulated_cost: charge_on_reject,
         })
     }
 }
@@ -403,17 +405,15 @@ mod tests {
         ClientEdgeState {
             connector,
             signer: test_signer(),
-            claim_gate,
+            claim_gate: claim_gate.into(),
             wrap_receiver_secret: None,
-            settlement_terms: None,
-            settlements: Vec::new(),
+            node: Arc::new(connector_domain::NodeFacts::default()),
             btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
             session_registry: Arc::new(session_registry),
             // A node that mounts no peer carriage (issue #678): every
             // interaction on its listeners is a client's, which is the only
             // audience session routing has.
             peers: None,
-            bootstrap_identity: None,
             identities: Arc::from([]),
         }
     }
@@ -738,16 +738,21 @@ mod tests {
     /// unchanged by #902.
     #[tokio::test]
     async fn a_configured_peer_route_still_outranks_an_overlapping_session() {
-        let connector = Arc::new(Connector::new(
-            vec![],
-            vec![connector_runtime::PeerRoute::new(
-                "g.example.peer",
-                "peer-a",
-                0,
-            )],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
+        // ADR 0042: a peering with nothing to pay it from is refused
+        // before the transport is ever reached (issue #1145), so the hop
+        // has to be covered for this test to be about routing at all.
+        let connector = Arc::new(crate::tests::covering(
+            Connector::new(
+                vec![],
+                vec![connector_runtime::PeerRoute::new(
+                    "g.example.peer",
+                    "peer-a",
+                )],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ),
+            "peer-a",
         ));
 
         let registry = SessionRegistry::new();

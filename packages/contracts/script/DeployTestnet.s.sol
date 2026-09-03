@@ -17,7 +17,7 @@ import "../src/TokenNetworkRegistry.sol";
  * Deploys, in one broadcast:
  *   1. TokenNetworkRegistry (the factory the connector resolves TokenNetworks through)
  *   2. A 6-decimal mock USDC ("USD Coin (mock)", "USDC") — decimals match the
- *      USDC theme used on the Solana/Mina settlement chains.
+ *      USDC theme used on the Solana settlement chain.
  *   3. A TokenNetwork for the mock USDC, created *through the registry* so that
  *      `registry.getTokenNetwork(usdc)` resolves it (this is how the connector
  *      finds the TokenNetwork at runtime, given only registryAddress + tokenAddress).

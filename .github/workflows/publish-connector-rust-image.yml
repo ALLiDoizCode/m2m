@@ -3,7 +3,52 @@ name: Publish connector-rust image
 # Publishes the Rust connector (crates/connector-bin, built via
 # deploy/connector-rust/Dockerfile) to GHCR as ghcr.io/toon-protocol/connector,
 # tagged `rust-sha-<short-sha>` (immutable, content-pinned) and `rust-main`
-# (floating). #429 added the Dockerfile, #465 left publishing to #487.
+# (floating, moved to the newest green main build).
+# #429 added the Dockerfile, #465 left publishing to #487.
+#
+# ── `rust-release` IS NOT PUBLISHED HERE, AND THAT IS THE POINT ─────────────
+# #990 originally added `type=raw,value=rust-release,enable={{is_default_branch}}`
+# to the tag list below, which made `:rust-release` move on EVERY green merge
+# to `main`. Both devnet boxes were then repointed to follow that tag with a
+# label-scoped Watchtower, so every green merge reached the live client edge
+# on two machines within ~60s, unvalidated.
+#
+# That contradicted the design of record. toon-meta#403 and #989's own closing
+# comment, both recorded as owner-approved, say `:rust-release` is a
+# "deliberate PROMOTION tag (a manual `promote-to-fleet` dispatch retags a
+# validated `rust-sha-*`), NOT auto-on-green" -- the gate ADR 0041 exists to
+# preserve. The workflow was never retargeted and no promote workflow was ever
+# written.
+#
+# (Those source comments cite "ADR 0034" for that gate and this file repeated
+# it. That is a mis-citation: ADR 0034 is "A runtime peer/route table never
+# shadows the config file". The release-gating record is ADR 0041. The
+# comments also named connector#972, an open pin PR, as the gate; it was
+# closed as superseded, because the supervised regime it argued for is what
+# `promote-to-fleet.yml` implemented, until ADR 0068 retired it.)
+#
+# It was written for a while: `.github/workflows/promote-to-fleet.yml`. This
+# workflow published CANDIDATES; that one chose which candidate fronted the
+# fleet, after checking it still booted both boxes' committed
+# `connector-rust.toml` (ADR 0041). ADR 0068 retired it: neither devnet box
+# deploys the connector from this repository any more (each pins it by
+# release handle in its own repo's `deploy/` bundle), so there is nothing
+# left here for a promotion to check or move a tag onto. `swap`, `store` and
+# `relay` still keep auto-on-green in their own repos -- see
+# docs/operators/fleet-release-and-health.md.
+#
+# ── AND THIS FILE STILL DOES NOT DEPLOY ANYTHING ────────────────────────────
+# .github/workflows/release-connector.yml (ADR 0055, amended by ADR 0068) now
+# automates the mechanical half of cutting a release: it calls this workflow
+# to build, cuts a dated release handle, and opens a GitHub Release naming the
+# `rust-sha-` tag. What it does not do -- and must never be edited to do -- is
+# deploy that build anywhere, or start itself. A green merge to `main` still
+# reaches GHCR and stops there. `connector-rust` is the client edge on BOTH
+# devnet boxes, so one bad digest reaching either unreviewed would take that
+# box's paid-write path dark; that risk does not go away just because this
+# repo no longer holds the write path onto the boxes. The human choice of
+# build is the deploy decision, made once per node repo, in that repo's own
+# reviewed pin bump.
 #
 # NAME HISTORY (reversal, connector#633): #487 originally shipped this as a
 # SEPARATE package `connector-rust`, to avoid colliding with the TypeScript
@@ -28,16 +73,58 @@ on:
       - 'deploy/connector-rust/Dockerfile'
       - '.github/workflows/publish-connector-rust-image.yml'
   workflow_dispatch: {}
+  # Called by release-connector.yml, so a release and a green main produce a
+  # build from ONE definition. A second `docker build` copied into the release
+  # workflow would be a second thing to keep in step with the Dockerfile, the
+  # platform decision and the ADR 0009 refusal check below -- and the two
+  # would drift silently, because only one of them runs on most days.
+  #
+  # A release run is not a green-main run in three respects, all handled by
+  # inputs rather than by branching inside the steps:
+  #   * it stamps a release handle into the image (`release_handle`), so
+  #     `docker inspect` on a box answers "which release is this?";
+  #   * it must not be cancelled by an unrelated merge (see `concurrency`);
+  #   * its caller needs the resulting tag and digest back (see `outputs`).
+  workflow_call:
+    inputs:
+      release_handle:
+        description: >-
+          Monotonic release handle (e.g. 2026.08.21.1) to stamp as this
+          image's `org.opencontainers.image.version` label. Empty on a
+          green-main build, which is not a release and has no handle.
+        type: string
+        required: false
+        default: ''
+    outputs:
+      image_tag:
+        description: 'The immutable `rust-sha-<short>` tag this run published.'
+        value: ${{ jobs.build-and-push.outputs.image_tag }}
+      short_sha:
+        description: 'The 7-character commit prefix that tag is cut from.'
+        value: ${{ jobs.build-and-push.outputs.short_sha }}
+      digest:
+        description: 'The manifest digest the tag resolves to.'
+        value: ${{ jobs.build-and-push.outputs.digest }}
 
 concurrency:
-  group: publish-connector-rust-image
-  # Supersede an in-flight build when a newer commit lands on main. This image
-  # is published per-push and tagged by content, so only the newest is ever
-  # wanted -- and `false` meant a superseded build held the group while the
-  # build someone was actually waiting on sat queued behind it (46 minutes,
-  # observed 2026-07-29). An older run's `sha-` tag is not lost by being
-  # cancelled: it can be rebuilt by `workflow_dispatch` on that commit.
-  cancel-in-progress: true
+  # Two groups, selected by what triggered the build.
+  #
+  # `auto` -- a push to main. Supersede an in-flight build when a newer commit
+  # lands. This image is published per-push and tagged by content, so only the
+  # newest is ever wanted -- and `false` meant a superseded build held the
+  # group while the build someone was actually waiting on sat queued behind it
+  # (46 minutes, observed 2026-07-29). An older run's `sha-` tag is not lost by
+  # being cancelled: it can be rebuilt by `workflow_dispatch` on that commit.
+  #
+  # `${{ github.run_id }}` -- a release build (release-connector.yml calls this
+  # workflow) or a manual dispatch. It gets a group of its own, so it can
+  # neither cancel nor be cancelled. That is not a nicety: a release build
+  # cancelled halfway by an unrelated merge would leave release-connector.yml's
+  # later jobs with a handle and a GitHub Release naming an image that was
+  # never pushed. In a called workflow `github.event_name` and `github.run_id`
+  # are the CALLER's, which is what makes this discriminate correctly.
+  group: publish-connector-rust-image-${{ github.event_name == 'push' && 'auto' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: read
@@ -50,6 +137,10 @@ jobs:
   build-and-push:
     name: Build and push connector-rust image
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: rust-sha-${{ steps.sha.outputs.short }}
+      short_sha: ${{ steps.sha.outputs.short }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -78,11 +169,32 @@ jobs:
           images: ${{ env.IMAGE }}
           # `rust-` prefix keeps these disjoint from any TS-node tag that ever
           # lived in this package (semver X.Y.Z, latest, main). See header.
+          # `rust-release` is DELIBERATELY ABSENT — see the header. Nothing in
+          # this repository moves it any more (ADR 0068); it is not a build
+          # output either way.
+          #
+          # The release handle (`rust-2026.08.21.1`) is deliberately absent
+          # too, for the opposite reason: it is not known here. It is applied
+          # by release-connector.yml as a retag of THIS manifest, so the tag
+          # and the GitHub Release that names it cannot disagree about which
+          # digest they mean.
           tags: |
             type=raw,value=rust-sha-${{ steps.sha.outputs.short }}
             type=raw,value=rust-main,enable={{is_default_branch}}
+          # Stamped only on a release build. CONNECTOR_RELEASE_CONTRACT.md's
+          # one surviving guarantee about the retired TypeScript image was
+          # that this label equalled the tag it was published under; the Rust
+          # image now keeps the same property for its release handle, which is
+          # what lets `docker inspect` on a box answer "which release is this?"
+          # without consulting GHCR. On a green-main build `inputs` is null,
+          # the expression is empty, and metadata-action's own default for
+          # this label stands.
+          labels:
+            ${{ inputs.release_handle && format('org.opencontainers.image.version={0}',
+            inputs.release_handle) || '' }}
 
       - name: Build and push connector-rust image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -158,4 +270,10 @@ jobs:
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
+            echo ""
+            echo "**Digest:** \`${{ steps.build.outputs.digest }}\`"
+            if [ -n "${{ inputs.release_handle }}" ]; then
+              echo ""
+              echo "Release handle stamped: \`${{ inputs.release_handle }}\`"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

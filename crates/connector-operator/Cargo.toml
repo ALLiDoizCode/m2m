@@ -8,6 +8,7 @@ license.workspace = true
 test-util = []
 
 [dependencies]
+connector-client-edge = { path = "../connector-client-edge" }
 connector-domain = { path = "../connector-domain" }
 connector-runtime = { path = "../connector-runtime" }
 connector-settlement = { path = "../connector-settlement" }
@@ -19,12 +20,21 @@ serde_json = "1"
 ed25519-dalek = "1"
 sha2 = "0.10"
 base64 = "0.22"
+# Namespacing a bare channel id into the client-edge book's own "evm:"/
+# "solana:" key (issue #1218) needs the same base58-decodes-to-32-bytes
+# shape check `connector-client-edge`'s own channel registry uses.
+bs58 = "0.5"
+# `POST /peers` takes the counterparty's URL as a field (ADR 0058) and
+# parses it here, so a request that names something that is not a URL is a
+# `400` from this crate rather than a refusal deeper in.
+url = "2"
 
 [dev-dependencies]
 connector-config = { path = "../connector-config" }
-connector-settlement-evm = { path = "../connector-settlement-evm" }
+connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
 ethers = { version = "2", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.4", features = ["util"] }
 hyper = { version = "0.14", features = ["full"] }
 rand = "0.7"
+tempfile = "3"

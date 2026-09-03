@@ -49,11 +49,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use connector_btp::{CLAIM_HEADER, MINIMUM_DELIVERY_HEADER};
+use connector_btp::CLAIM_HEADER;
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
-use connector_peer_auth::{encode_base64, PresentedCredential, PEER_AUTH_HEADER};
 use connector_peer_btp::claim_json::{self, PeerClaimDomain};
 use connector_runtime::{ClaimAckOutcome, Clock, PeerForward, PeerTransport, WireClaim};
 use url::Url;
@@ -120,14 +120,18 @@ pub trait PeerHttpClient: Send + Sync {
 
 /// One peering relation, as the dial side needs it.
 ///
-/// Per **relation**, never per connection (§2.5): the timeouts, the
-/// credential and the claim domains all belong to the relation, and
-/// splitting them per connection is a double-spend surface.
+/// Per **relation**, never per connection (§2.5): the timeouts and the
+/// claim domains belong to the relation, and splitting them per connection
+/// is a double-spend surface.
+///
+/// There is nothing here to present on the way in. ADR 0060 deleted the
+/// `{peerId, secret}` credential this used to carry and set on every
+/// request: what proves the peering at the far end is the claim covering
+/// each packet, which this transport already renders and sends.
 #[derive(Debug, Clone)]
 pub struct PeerRelation {
     peer_id: String,
     endpoint: Url,
-    credential: PresentedCredential,
     /// Canonical EVM channel id → the EIP-712 domain its claims are signed
     /// under, from that peering's EVM-shaped `[[peer_channels]]` rows.
     domains: HashMap<String, PeerClaimDomain>,
@@ -178,7 +182,6 @@ impl PeerRelation {
         Some(PeerRelation {
             peer_id: peer.id().to_string(),
             endpoint,
-            credential: PresentedCredential::new(peer.id(), peer.credential().secret()),
             domains,
             solana_program_ids,
             peer_answer_timeout: Duration::from_millis(peer.peer_answer_timeout_ms()),
@@ -192,7 +195,6 @@ impl PeerRelation {
     pub fn new(
         peer_id: impl Into<String>,
         endpoint: Url,
-        credential: PresentedCredential,
         domains: HashMap<String, PeerClaimDomain>,
         solana_program_ids: HashMap<String, String>,
         peer_answer_timeout: Duration,
@@ -201,7 +203,6 @@ impl PeerRelation {
         PeerRelation {
             peer_id: peer_id.into(),
             endpoint,
-            credential,
             domains,
             solana_program_ids,
             peer_answer_timeout,
@@ -252,7 +253,19 @@ pub struct HttpPeerTransport {
     /// carriage holds the identical contract.
     solana_signer_public_key: Option<[u8; 32]>,
     clock: Arc<dyn Clock>,
-    relations: HashMap<String, RelationState>,
+    /// Peer id → that peering's relation and its claim-exchange state.
+    ///
+    /// Copy-on-write behind an [`ArcSwap`] since ADR 0058: a peering
+    /// established over the operator surface must be dialable **while this
+    /// process serves**, and a map built once at boot is precisely what
+    /// made a runtime peer row a name with nothing behind it. Reads stay on
+    /// the packet path and stay lock-free; a write clones a map with one
+    /// entry per peering, which is an operator-frequency cost.
+    ///
+    /// Each entry is an [`Arc`] so a forward already in flight keeps the
+    /// state it started on even if the peering is deregistered underneath
+    /// it -- the alternative is a claim's pending set vanishing mid-request.
+    relations: ArcSwap<HashMap<String, Arc<RelationState>>>,
 }
 
 impl HttpPeerTransport {
@@ -267,7 +280,7 @@ impl HttpPeerTransport {
             signer_address,
             solana_signer_public_key: None,
             clock,
-            relations: HashMap::new(),
+            relations: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
@@ -278,22 +291,54 @@ impl HttpPeerTransport {
         self.solana_signer_public_key = Some(public_key);
     }
 
-    /// Register a peering this connector dials over HTTP. Relations are
-    /// added before the transport is shared; the map itself is never mutated
-    /// afterwards, so reading it on the packet path takes no lock.
-    pub fn add_peer(&mut self, relation: PeerRelation) {
-        self.relations.insert(
-            relation.peer_id.clone(),
-            RelationState {
-                relation,
-                pending: Mutex::new(Pending::default()),
-                in_flight: Mutex::new(HashMap::new()),
-            },
-        );
+    /// Register a peering this connector dials over `https://`, replacing
+    /// whatever was registered under the same id.
+    ///
+    /// Callable while the process serves (ADR 0058), not only during
+    /// construction: `POST /peers` establishes a peering and this is how it
+    /// becomes reachable without a restart.
+    pub fn add_peer(&self, relation: PeerRelation) {
+        self.rebind(|relations| {
+            relations.insert(
+                relation.peer_id.clone(),
+                Arc::new(RelationState {
+                    relation,
+                    pending: Mutex::new(Pending::default()),
+                    in_flight: Mutex::new(HashMap::new()),
+                }),
+            );
+        });
+    }
+
+    /// Stop dialing `peer_id`. A no-op for an id this transport never
+    /// held.
+    ///
+    /// The other half of runtime registration: `DELETE /peers` is the kill
+    /// switch ADR 0060 named when it removed the shared secret, and a kill
+    /// switch that leaves the carriage dialing is not one.
+    pub fn remove_peer(&self, peer_id: &str) {
+        self.rebind(|relations| {
+            relations.remove(peer_id);
+        });
+    }
+
+    /// Replace the relation map with a copy that has `change` applied. See
+    /// the field's own doc for what this costs and why the packet path
+    /// pays nothing for it.
+    fn rebind(&self, change: impl FnOnce(&mut HashMap<String, Arc<RelationState>>)) {
+        let mut next = (**self.relations.load()).clone();
+        change(&mut next);
+        self.relations.store(Arc::new(next));
+    }
+
+    /// The relation registered for `peer_id`, held past the read so a
+    /// forward in flight is unaffected by a concurrent deregistration.
+    fn relation(&self, peer_id: &str) -> Option<Arc<RelationState>> {
+        self.relations.load().get(peer_id).cloned()
     }
 
     /// Every `https://` peering in a loaded config, with its channels.
-    pub fn add_peers_from_config(&mut self, peers: &[PeerConfig], channels: &[PeerChannelConfig]) {
+    pub fn add_peers_from_config(&self, peers: &[PeerConfig], channels: &[PeerChannelConfig]) {
         for peer in peers {
             if let Some(relation) = PeerRelation::from_config(peer, channels) {
                 self.add_peer(relation);
@@ -307,23 +352,26 @@ impl HttpPeerTransport {
     /// the packet path depends on this being drained.
     #[must_use]
     pub fn flush_hints(&self, peer_id: &str) -> Vec<String> {
-        let Some(state) = self.relations.get(peer_id) else {
+        let Some(state) = self.relation(peer_id) else {
             return Vec::new();
         };
+        let state = state.as_ref();
         let pending = state.pending.lock().expect("pending claims lock poisoned");
         let mut hints: Vec<String> = pending.hinted.iter().cloned().collect();
         hints.sort();
         hints
     }
 
-    /// The headers every peer request carries (§1.4): the credential, on
-    /// **every** request, because HTTP has no session to bind a role to. A
-    /// request without it is a client request, whatever the previous request
-    /// on the same connection carried.
-    fn base_headers(&self, state: &RelationState) -> Headers {
-        let mut headers = Headers::new();
-        headers.push(PEER_AUTH_HEADER, encode_base64(&state.relation.credential));
-        headers
+    /// The headers every peer request carries.
+    ///
+    /// None, now. This used to set `Toon-Peer-Auth` on every request --
+    /// HTTP has no session, so the credential had to ride each one. ADR
+    /// 0060 deleted it, and what identifies the peering on each request is
+    /// what already had to be there: `Toon-Payment-Channel-Claim`. The
+    /// function survives as the one place a per-request header would be
+    /// added, so a future one is added once rather than at each call site.
+    fn base_headers(&self, _state: &RelationState) -> Headers {
+        Headers::new()
     }
 
     /// The claim header for `claim`, reusing the exact bytes already emitted
@@ -541,16 +589,16 @@ impl PeerTransport for HttpPeerTransport {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward {
-        let Some(state) = self.relations.get(peer_id) else {
+        let Some(state) = self.relation(peer_id) else {
             tracing::warn!(peer_id, "no HTTP peering to originate to; {NAT_NOTE}");
             return PeerForward {
                 response: peer_not_dialable(peer_id),
                 ..PeerForward::unreachable(peer_id)
             };
         };
+        let state = state.as_ref();
 
         let mut request = PeerRequest {
             headers: self.base_headers(state),
@@ -560,14 +608,6 @@ impl PeerTransport for HttpPeerTransport {
             // no key for.
             body: prepare.encode(),
         };
-        // §5.1: the sender's declaration, re-emitted **unchanged** on this
-        // outbound hop. It is the one carriage-layer field that propagates
-        // rather than being re-derived (§8.3), and crossing carriages must
-        // not alter it.
-        if let Some(value) = headers::minimum_delivery_header_value(minimum_delivery) {
-            request.headers.push(MINIMUM_DELIVERY_HEADER, value);
-        }
-
         // A hinted retransmission rides only a request that carries no claim
         // of its own, and only ever as the *same bytes* already emitted
         // (§6.3, §6.4). It is this connector's own housekeeping, not the
@@ -632,10 +672,11 @@ impl PeerTransport for HttpPeerTransport {
     }
 
     async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome {
-        let Some(state) = self.relations.get(peer_id) else {
+        let Some(state) = self.relation(peer_id) else {
             tracing::warn!(peer_id, "no HTTP peering to flush to; {NAT_NOTE}");
             return ClaimAckOutcome::NotSent;
         };
+        let state = state.as_ref();
 
         // FLUSH (§3): a **POST with an empty ILP body** plus the claim
         // header -- the standalone-claim shape the client edge already

@@ -62,48 +62,37 @@
 # nothing here to amortize a handshake against.
 #
 # ── No `peer_wire_addr`, and no `[[peers]]`, deliberately ──────────────────
-# The previous draft of this file bound ADR 0003's raw-TCP peer wire on :4001,
-# and the compose overlay demanded a `STORE_PEER_WIRE_BIND` VPC address to
-# publish it on. Both are removed:
+# The very first draft of this file bound ADR 0003's raw-TCP transport on
+# :4001, and the compose overlay demanded a `STORE_PEER_WIRE_BIND` VPC
+# address to publish it on. Both were removed before ever shipping live:
 #
 #   * the VPC was never provisioned, and #600 settled that none is wanted —
 #     node↔node links on this fleet are public and TLS-terminated by each
 #     box's own nginx, like the TypeScript fleet's BTP-over-wss;
-#   * the peer wire cannot carry a public link (#623): raw-TCP custom framing
+#   * the peer semantics cannot carry a public link (#623): raw-TCP custom framing
 #     nginx cannot TLS-terminate, no transport security of its own by ADR
 #     0003's design, and SocketAddr-only addressing — see
 #     crates/connector-config/src/peer.rs, where a peer is `{ id, addr }` and
-#     nothing else, with nothing to hang a handshake on;
-#   * the paid forwarded path was structurally unwired when this file was
-#     written (#620): a peer route was neither priced at the client edge nor
-#     charged on arrival at the terminating side, so a peer-forwarded
-#     `g.toon.store` would have served this store app FOR FREE, beside the
-#     g.toon proxy's paid door. ADR 0028 closed the first half -- a `peer_id`
-#     route now carries a `price` its client edge greets and charges, and
-#     cannot load without one -- so what remains open is arrival-side charging.
+#     nothing else, with nothing to hang a handshake on.
 #
-# Binding an unauthenticated plaintext listener on a box with no private
-# segment is a hazard with no upside while all three hold, so this node
-# accepts no inbound peer connection and dials no peer. It is a
-# client-edge-only connector — which is exactly what the g.toon proxy's Rust
-# node already is, and why the two are comparable.
-#
-# THE PEERING GOES HERE. When the inter-connector transport decision lands
-# (BTP over wss, or ILP-over-HTTP — not this file's call), the store leg gains
-# a peer entry below plus a route with a `peer_id` next hop, and the g.toon
-# proxy's `g.toon.ario` / `g.toon.store` routes stop being plain outbound
-# HTTPS POSTs to this box's nginx and become forwards over that peering. Until
-# then the proxy reaches the store app the way any client on the open internet
-# does.
+# ADR 0027 later gave this box a BTP peering to the apex instead
+# (`peer_expose = "btp"` plus an `[[peers]]`/`[[peer_channels]]` pair, issues
+# #678/#750) — the apex dialed in and forwarded `g.toon.ario` across it. That
+# peering is GONE as of issue #872 (toon-meta#310 / toon-meta#313's live
+# cutover): the apex that dialed it no longer exists, so there is nothing to
+# accept a connection from. This box is client-edge-only again, the same
+# shape it had before ADR 0027 and the same shape the relay box's own client
+# edge already is — no inbound peer connection accepted, no peer dialed.
 #
 # ── Settlement ─────────────────────────────────────────────────────────────
-# Live, and deliberately identical to the g.toon proxy's
-# (infra/linode-node/connector-rust.toml): the same Base Sepolia
-# `TokenNetworkRegistry` and USDC, the same Solana payment-channel program and
-# mint, both at 6 decimals. It has to be the same deployment — a claim this
-# node accepts is written against the channel the buyer opened on the shared
-# devnet contracts, and a node pointed at a different registry cannot resolve
-# it.
+# Live, and deliberately identical to the relay box's
+# (infra/linode-relay/connector-rust.toml) -- and, while it still ran,
+# identical to the apex's own (infra/linode-node/connector-rust.toml, removed
+# by issue #872): the same Base Sepolia `TokenNetworkRegistry` and USDC, the
+# same Solana payment-channel program and mint, both at 6 decimals. It has to
+# be the same deployment — a claim this node accepts is written against the
+# channel the buyer opened on the shared devnet contracts, and a node pointed
+# at a different registry cannot resolve it.
 #
 # DECISION (owner-confirmed 2026-08-03): this node settles on BOTH chains.
 #
@@ -125,10 +114,10 @@
 #
 # If a future edit wants EVM-only again, change this comment in the same edit.
 # A header that argues the opposite of the values beneath it is not a
-# harmless stale note — the live g.toon proxy's `connector-rust.toml` carries a
-# comment asserting parity at `1000` above a `price = 1`, and that
-# contradiction is exactly why a 1000x price cut sat unnoticed for twenty
-# hours. Do not reproduce it here.
+# harmless stale note — the retired apex's `connector-rust.toml` (removed by
+# issue #872) carried a comment asserting parity at `1000` above a `price = 1`,
+# and that contradiction is exactly why a 1000x price cut sat unnoticed for
+# twenty hours. Do not reproduce it here.
 #
 # ── Key provisioning, and the mnemonic-reuse decision ──────────────────────
 # Three key files, all this box's own, mounted read-only by the overlay. They
@@ -203,153 +192,52 @@ client_edge_addr = "0.0.0.0:4000"
 # constrains rolling BACK, not rolling forward.
 state_dir = "/app/state"
 
-# ── The g.toon proxy<->store peering (ADR 0027, issues #678/#750) ─────────
-# This box is the ACCEPTING half: it exposes a BTP listener and never dials.
-# The g.toon proxy is the dialing half and carries the `endpoint`
-# (infra/linode-node/connector-rust.toml).
-#
-# `peer_expose` is a bare top-level key, so it lives up here with
-# `client_edge_addr` and `state_dir` rather than next to the [[peers]] table
-# it configures -- written after any table header it would be read as a key
-# OF that table and refused.
-peer_expose = "btp"
-
-# The peering lived on the boxes only until #750 gave `credential` a
-# `secret_file`: this file is committed to a PUBLIC repository, so a peering
-# written with a literal could not be committed at all.
-[[peers]]
-# ONE string both operators write: the g.toon proxy puts this in its credential
-# and this node proves P1 by looking it up here. Same literal on both sides, or
-# nothing peers and there is no error anywhere.
-id = "apex-store"
-# The shared secret, as a FILE. `infra/linode-store/*.secret` is gitignored,
-# so the peering is tracked and only the bytes stay on the box. Missing,
-# unreadable or empty is a refuse-to-start by name (PeerSecretFileNotFound /
-# -Unreadable / -Empty), never a peering that silently never establishes.
-credential = { secret_file = "/app/data/apex-store.secret" }
-# No `endpoint`: this node accepts and never dials. `ceiling` used to be
-# REQUIRED here (AcceptOnlyPeerWithoutCeiling) -- retired along with the
-# credit window it bounded (ADR 0031, ADR 0033, issue #882): every peer
-# PREPARE now carries its own covering claim.
-
-# Role is decided by authentication AND a channel binding (peer-carriage-spec
-# 1.2, ADR 0024). Without this row the g.toon proxy authenticates fine, is
-# admitted only as an ordinary client, and every claim it sends is refused
-# `unknown_channel` -- which is exactly what happened before #678 wired this
-# table to `ClaimBook`.
-[[peer_channels]]
-peer_id = "apex-store"
-# PLACEHOLDER (issue #822) -- these two values are NOT a real channel and
-# must not be used as one. The retired channel (the real values this
-# replaced) still lives, unclosed, on the OLD TokenNetwork
-# (0x1E95493fEF46707E034b4a1945f25a8C76A1823D) until the live migration
-# proves a replacement against the new TokenNetwork below works end to
-# end; only then is the retired channel closed and settled, per
-# docs/operators/peer-channel-migration.md. That runbook opens the
-# replacement channel and overwrites both placeholders with its real
-# channel_id and the apex box's settlement address, on BOTH boxes
-# together.
-channel_id = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
-counterparty_key = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
-# The EIP-712 domain a claim on this channel is signed over
-# (EIP712("TokenNetwork","1"), ADR 0024). A claim signed under a different
-# domain recovers to a different address and is refused. Repointed to the
-# new ERC-2771 TokenNetwork (issue #822, #695/#811) -- both boxes must
-# agree, or a claim one accepts is unresolvable by the other.
-chain_id = 84532
-token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
+# ── No peering, deliberately (issue #872) ──────────────────────────────────
+# ADR 0027 gave this box a BTP peering to the apex (`peer_expose = "btp"`
+# plus an `[[peers]]`/`[[peer_channels]]` pair naming peer id `apex-store`,
+# issues #678/#750): this box was the ACCEPTING half, the apex dialed in and
+# forwarded `g.toon.ario` across it at a `price`/`fee` split
+# (docs/devnet-pricing.md). The apex is gone (toon-meta#310 /
+# toon-meta#313's live cutover) and with it the only counterparty that ever
+# dialed this peering, so `peer_expose` and both tables are removed rather
+# than left pointing at nothing. With no hop, there is no fee and no peer
+# arrival, so the F03 peer-arrival case this table used to make possible
+# cannot arise on this box any more. See the header's "No `peer_wire_addr`"
+# section above for the fuller history.
 
 [signer]
 key_file = "/app/data/signer.key"
 
-# ── Announce (issue #833) ───────────────────────────────────────────────────
-# This box's own kind:10032 publisher, so `g.toon.ario` is discoverable under
-# THIS node's identity -- the same `[signer]` key that answers `GET
-# /ilp/identity` and opens every gift wrap this node terminates.
+# ── The facts this node cannot introspect (ADR 0050, issue #1080) ────────
+# `[node]` was `[announce]` until ADR 0046 removed the kind:10032 announce
+# outright (issue #1074). Two of its fields already fed the packet path -- the
+# x402 greeting carries them so a client with a stale genesis peer seed can
+# bootstrap (issue #807) -- and ADR 0050 re-homed them, with the public HTTP
+# endpoint beside them, into a section named for what they ARE rather than for
+# a verb this connector no longer has.
 #
-# Before this section existed, the ONLY publisher of `g.toon.ario` was the
-# g.toon proxy's announcer sidecar (infra/linode-node/docker-compose.node.
-# announcer.yml), advertising the PROXY's identity for a prefix the proxy
-# FORWARDS rather than terminates (ADR 0028/#772). A stock client reads that
-# announce, seals its gift wrap to the proxy's key, pays at the client edge --
-# and the store box, which is the connector that actually holds the key the
-# wrap is sealed to (ADR 0018), cannot open it: `F01 gift wrap could not be
-# opened`, after the money is already spent. That defect is what issue #833
-# is. This section is the fix's terminating-side half; the proxy's stopgap
-# announce of this same prefix is retired in the same change (see that file's
-# own comment).
+# Three fields, and they are here for one reason: no process can learn them
+# about itself. This container sees `0.0.0.0:4000` and a private docker
+# network, never `https://proxy.ario.devnet.toonprotocol.dev/ilp`. Everything
+# else this node says about itself is DERIVED -- prices from `[[routes]]`,
+# settlement facts from the `[settlement.*]` backends that verified them
+# against a chain at startup, the edge identity from `[signer]` -- and is
+# served, free and unauthenticated, by `GET /ilp`.
 #
-# `identity_key_file` is deliberately ABSENT. That field exists to carry a
-# PRIOR publisher's identity forward (issue #799) so a genesis seed already
-# pinning that pubkey does not go stale -- and it does not apply here: this
-# box has never had a kind:10032 publisher of its own (no sidecar, no prior
-# `connector announce`), and the genesis seed pins the g.toon proxy's
-# announcer pubkey, not this box's. Announcing under this node's own
-# `[signer]` is correct from the start and strands nobody.
-#
-# `relay_url` is deliberately ABSENT too: this box fronts no relay (see
-# docs/operators/announcing-a-node.md), and pointing it at the g.toon proxy's
-# relay would advertise free reads this node does not serve.
-[announce]
+# What used to be here and is now refused BY NAME at boot (ADR 0009):
+# `relay_url` (an assertion about the relay app BEHIND a node, which a
+# self-description never carries -- ND-08), `publish_to`, `publish_btp_url`,
+# `pay_channel` (this box no longer pays anybody to be discovered; issue
+# #1074 removed the verb that spent it), `identity_key_file`, `ttl_secs`,
+# `route_publish`, `route_store`, `asset_code`, `asset_scale`,
+# `solana_chain_id` and the four `notice_*`. The two-box-cutover notice this
+# section used to carry rode the announce; with the announce gone there is no
+# wire for it, and toon-meta's own `docs/operators/2026-08-13-two-box-cutover.md`
+# remains the durable text.
+[node]
 addresses     = ["g.toon.ario"]
 http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
 btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
-# The address of the route that terminates at the chosen relay's write
-# ingress. `g.toon.relay` is the RELAY BOX's own terminating route -- as of
-# issue #871 this node pays THROUGH THE RELAY's client edge directly, not
-# through the apex, per toon-meta#310 (retiring the apex: the relay box is
-# the fleet's only public write ingress once it goes). Still the same
-# address; only who terminates it, and who this box pays, changed.
-publish_to = "g.toon.relay"
-# The TARGET's BTP endpoint -- where THIS node pays the relay box, not
-# where clients pay this node (`btp_endpoint` above is that one; the two
-# point in opposite directions, which is why this one is spelled `publish_*`
-# alongside `publish_to`).
-#
-# Issue #871: repointed off the apex (`wss://proxy.devnet.toonprotocol.dev/
-# ilp/btp`, issue #820's value) onto the relay box's own advertised
-# `btp_endpoint` (infra/linode-relay/connector-rust.toml's `[announce]`
-# section). The relay's own `g.toon.relay` route is pinned
-# `transport = "btp"` (issue #701, the relay's high-frequency
-# always-connected traffic) -- `pay_the_through_url` reads that requirement
-# off the target's own greeting and refuses `NoBtpEndpoint` up front,
-# before anything is signed, with neither `--btp-url` nor this key set. The
-# scheduled command in docker-compose.store.announce.yml passes no
-# `--btp-url`, so this is where it comes from.
-publish_btp_url = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
-# `pay_channel` names a funded EVM channel this box PAYS THE RELAY BOX
-# from, as an ordinary client. It is deliberately NOT a
-# `[[client_channels]]` row: that table is channels this node RECEIVES on,
-# and one channel in both roles is the same collision `Config::load`
-# already refuses between the peer and client books
-# (`ConfigError::ChannelInBothNamespaces`). See ADR 0030.
-#
-# Opening and funding the real channel -- WITH THE RELAY BOX, replacing the
-# apex-funded channel issue #820's cutover made obsolete -- is a live,
-# human step (docs/operators/announcing-a-node.md's "What the node needs
-# before this can work"), not something a repo diff can supply, so -- per
-# the same #822 placeholder policy the `[[peer_channels]]` channel id above
-# already follows -- this commits a clearly-marked placeholder rather than
-# either the live value or an absent field. The real id lives only on the
-# box (issues #853/#871); the scheduled `connector announce` in
-# docker-compose.store.announce.yml reads whichever value the box's own
-# copy of this file carries.
-pay_channel = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de"
-
-# `notice_id`/`notice_severity`/`notice_summary`/`notice_url` (issue #948,
-# re-homed from toon-meta#335) put the two-box-cutover operator notice on the
-# wire via the schema'd `notice` field (toon#183, issue #912) -- the
-# permanent mechanism, not toon-meta#335's retired content ride-along. The
-# durable text lives at `notice_url`, in toon-meta's own
-# `docs/operators/2026-08-13-two-box-cutover.md`; this box's announce carries
-# only the pointer, per that doc's own convention
-# (`docs/operators/README.md` in toon-meta). `severity` is `action-required`:
-# this box IS the store leg the notice warns about -- an upload here does not
-# self-heal after the cutover without an updated client.
-notice_id       = "2026-08-13-two-box-cutover"
-notice_severity = "action-required"
-notice_summary  = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover."
-notice_url      = "https://github.com/toon-protocol/toon-meta/blob/main/docs/operators/2026-08-13-two-box-cutover.md"
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
@@ -373,29 +261,30 @@ price = 1000
 # "Known divergence" section named -- adding a dedicated apex forward row
 # for it at 1002/fee 2) is #820's resolution of that divergence.
 #
-# The apex's Rust route table has only ever declared `g.toon.relay` and
+# The apex's Rust route table only ever declared `g.toon.relay` and
 # `g.toon.ario`, never this name, so longest-prefix matching always dropped
 # `g.toon.relay.ario` into the `g.toon.relay` route -- which the apex
 # TERMINATED against `relay:3100` until #820, so every arrival here 404'd
-# for free. #820 turns `g.toon.relay` into a peer_id forward to the relay
+# for free. #820 turned `g.toon.relay` into a peer_id forward to the relay
 # box, whose own route table also declares only `g.toon.relay`, never a
-# `.ario` child -- so the SAME longest-prefix match would keep landing
+# `.ario` child -- so the SAME longest-prefix match would have kept landing
 # there, just after consuming a real signed claim on the apex<->relay
-# channel instead of failing for free. Retiring the name here (nothing in a
+# channel instead of failing for free. (The apex, and that forward, are gone
+# as of issue #872; the relay box terminates the prefix for its own clients
+# now, and still declares no `.ario` child.) Retiring the name here (nothing in a
 # shipped client addresses it; buzz pins `storeDestination: "g.toon.ario"`
 # in compiled code) closes the gap rather than relocating and pricing it.
 
 # ── Settlement ─────────────────────────────────────────────────────────────
-# Same registry/token/decimals the apex names, and the same custody facts:
-# `TokenNetwork.owner()` is the registry below, which forwards no call into
-# a `TokenNetwork` and never calls `transferOwnership` -- so `pause`/
-# `emergencyWithdraw` are unreachable here too (see the apex's
-# `infra/linode-node/connector-rust.toml` for the full citation, issue
-# #577).
+# Same registry/token/decimals the relay box's own file names (and, while it
+# still ran, the apex's): `TokenNetwork.owner()` is the registry below, which
+# forwards no call into a `TokenNetwork` and never calls `transferOwnership`
+# -- so `pause`/`emergencyWithdraw` are unreachable here too (issue #577,
+# `docs/evm-deployment.md` for the full citation).
 
 [settlement.evm]
 rpc_url = "https://base-sepolia-rpc.publicnode.com"
-contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
+contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"
 token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
 decimals = 6
 
@@ -405,8 +294,64 @@ key_file = "/app/data/settlement.key"
 [settlement.solana]
 rpc_url = "https://api.devnet.solana.com"
 program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
-token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"
 decimals = 6
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"
+
+# ── Operator surface (ADR 0008; toon-meta#311/#312) ────────────────────────
+# This box's operator surface: the authenticated read/write control plane
+# (`GET /peers`, `/routes`, `/channels`, `/claims`, `/metrics`; `POST
+# /packets`) that ADR 0008 splits into a bearer-token read half and an RFC
+# 9421 signed-write half. Its PRESENCE here is what enables it — an absent
+# `[operator]` section means the surface is not started at all.
+#
+# It has been live on this box since toon-meta#312 and, until issue #1003,
+# existed ONLY on this box: the section was written with inline literals, a
+# literal bearer token cannot be committed to a public repository, and so
+# `main` carried no `[operator]` section at all. That made the surface
+# invisible drift in the most literal sense — the only record that this box
+# had the capability was the box, and any `fleet-ops` reconcile of the
+# committed tree would have deleted it without a word. #1003 added the
+# `*_file` forms below so the section itself is committable.
+#
+# The `0xdead…c0de` placeholder convention (#822/#853/#871) is deliberately
+# NOT what was used. A placeholder channel id fails loudly; a placeholder
+# bearer token is a working credential-shaped value, which is worse than
+# absent.
+#
+# ── The two files, which are NOT in git ────────────────────────────────────
+# Both paths are container paths, mounted by ./docker-compose.store.rust.yml
+# from files that must exist on the box before `up -d`, exactly like the
+# three key files that service already mounts:
+#
+#   /app/data/operator-bearer-token  ← ./operator-bearer-token.secret
+#       The read credential. A random hex string; generate with
+#       `openssl rand -hex 32`. Gitignored by `infra/linode-store/*.secret`.
+#
+#   /app/data/operator-write-keys    ← ./operator-write-keys.allow
+#       The write allowlist: one 64-hex ed25519 PUBLIC key per line, `#`
+#       starts a comment. No secret — the private halves never come near
+#       this box — but a file rather than a literal because ADR 0008 revokes
+#       write authority by removing a key and restarting, and ADR 0009 makes
+#       config immutable for the process lifetime: behind a file that is an
+#       edit on the box, behind a committed array it is a PR, a green CI run
+#       and a promotion. Gitignored by `infra/linode-store/*.allow`.
+#
+# Both must be readable by uid 10001 (`chown 10001:10001`, `chmod 600` on
+# the token). A missing, unreadable or empty file is a refuse-to-start
+# naming the setting — an operator surface that cannot read its own
+# authentication authenticates nobody, so it must not come up at all
+# (ADR 0009 applied to ADR 0008's fail-closed requirement).
+#
+# ── IMAGE FLOOR (ADR 0041) ─────────────────────────────────────────────────
+# `[operator]` is `deny_unknown_fields`, so an image built before #1003 does
+# not merely ignore `bearer_token_file` — it EXITS 1 on config load. Do not
+# apply this file to a box whose `connector-rust` is older than #1003's
+# image; promote first, then reconcile. This is the same rollback constraint
+# ./docker-compose.store.rust.yml records for `state_dir` (#605) and the
+# fresh state volume (#614).
+[operator]
+bearer_token_file = "/app/data/operator-bearer-token"
+write_keys_file = "/app/data/operator-write-keys"

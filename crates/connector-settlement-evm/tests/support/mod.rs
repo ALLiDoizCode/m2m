@@ -111,7 +111,7 @@ pub fn channel_id_bytes(id: &str) -> [u8; 32] {
     out
 }
 
-/// Sign `digest` exactly the way the production peer-wire/client-edge
+/// Sign `digest` exactly the way the production peer-role/client-edge
 /// signing path does (`connector_signer::crypto::sign_digest`): a 65-byte
 /// `r || s || v` signature with `v` in libsecp256k1's raw `{0, 1}` range,
 /// *not* the `{27, 28}` an EVM wallet would append. `EvmSettlementBackend`

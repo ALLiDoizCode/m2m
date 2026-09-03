@@ -388,15 +388,20 @@ echo "Building program..."
 cd "$PROGRAM_DIR"
 # Pinned, never bare: see PLATFORM_TOOLS_VERSION's comment — the gate, the
 # provenance record and the printed size figures all describe the v1.52
-# artifact, not whatever an operator's CLI happens to default to.
-cargo build-sbf --tools-version "$PLATFORM_TOOLS_VERSION"
+# artifact, not whatever an operator's CLI happens to default to. Through
+# build-sbf.sh (which is handed this same constant, so the two cannot drift)
+# because an operator deploying from a fresh machine hits the cold-cache panic
+# its header describes, and because it is what turns a silent fall back to the
+# CLI's built-in toolchain line — which would broadcast a binary no provenance
+# record covers — into a refusal.
+PLATFORM_TOOLS_VERSION="$PLATFORM_TOOLS_VERSION" "$SCRIPT_DIR/build-sbf.sh"
 echo "Build complete: $PROGRAM_SO"
 echo ""
 
 # Verify the .so file exists
 if [[ ! -f "$PROGRAM_SO" ]]; then
     echo "Error: Program binary not found at $PROGRAM_SO"
-    echo "Run 'cargo build-sbf --tools-version $PLATFORM_TOOLS_VERSION' from $PROGRAM_DIR"
+    echo "Run '$SCRIPT_DIR/build-sbf.sh' from $PROGRAM_DIR"
     exit 1
 fi
 

@@ -1,7 +1,0 @@
-node_modules/
-dist/
-src/zkapp-compiled/
-probe/
-browser-prove-test.mjs
-*.log
-.DS_Store

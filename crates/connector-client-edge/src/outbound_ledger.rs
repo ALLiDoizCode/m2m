@@ -9,14 +9,14 @@
 //! is "sign a fresh cumulative claim over a channel's own recorded EIP-712
 //! domain (ADR 0024), arm it pending, journal it, and degrade to no claim
 //! at all -- never one signed under a defaulted or wrong domain -- absent a
-//! signer or a channel's domain" for the peer wire's outbound direction.
+//! signer or a channel's domain" for the peer semantics's outbound direction.
 //! Reimplementing that digest math a second time here would risk the two
 //! copies drifting; wrapping it instead means a client-edge payout is
 //! signed by the exact same code path `crates/connector-runtime/src/claim.rs`
 //! already has vectors and proptests for.
 //!
 //! The only seam is the key. `ClaimBook::record_fulfillment` takes a
-//! `peer_id` to look up which channel it owes, because the peer wire's
+//! `peer_id` to look up which channel it owes, because the peer semantics's
 //! outbound state is keyed by peering relation, not by channel (see that
 //! module's own doc for why). A client-edge channel has no separate peer
 //! identity -- the channel *is* the identity -- so [`ClientPayoutLedger`]

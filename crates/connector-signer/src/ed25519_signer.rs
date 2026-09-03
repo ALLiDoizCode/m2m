@@ -1,6 +1,6 @@
 //! The ed25519 signer port (issue #742): the Solana counterpart of
 //! [`crate::Signer`]. A peer channel's outbound claim on Solana is signed
-//! with an ed25519 key over `crate::solana_balance_proof_message`'s 48
+//! with an ed25519 key over `crate::solana_balance_proof_message`'s 96
 //! bytes, never recovered like a secp256k1 signature -- kept as its own
 //! trait rather than folded into [`crate::Signer`], the same "do not merge
 //! the two chains behind one abstraction" rule
@@ -18,17 +18,31 @@ use rand::rngs::OsRng;
 
 use crate::error::SignerError;
 
-/// Sign a Solana peer claim's balance-proof message with this connector's
-/// own identity key. The counterpart of [`crate::Signer::sign`], over a
-/// fixed-size message rather than a digest -- `solana_balance_proof_message`
-/// is already the full 48 bytes ed25519 signs, with no separate hashing
-/// step the way an EIP-712 digest has one.
+/// Sign a Solana claim's balance-proof message -- or a claim-state
+/// challenge for one -- with this connector's own identity key. The
+/// counterpart of [`crate::Signer::sign`], over a message rather than a
+/// digest: `solana_balance_proof_message` is already the full bytes
+/// ed25519 signs, with no separate hashing step the way an EIP-712 digest
+/// has one.
 pub trait Ed25519Signer: Send + Sync {
     /// The raw 32-byte public key of the currently active key.
     fn public_key(&self) -> [u8; 32];
 
     /// Sign `message` with the currently active key.
-    fn sign(&self, message: &[u8; 48]) -> [u8; 64];
+    ///
+    /// A slice rather than `&[u8; 96]` (issue #1146): this key signs two
+    /// message layouts now, not one -- a balance proof
+    /// ([`crate::solana_balance_proof_message`], 96 bytes) and a
+    /// claim-state challenge
+    /// ([`crate::solana_claim_state_challenge_message`], 69), the latter
+    /// because a covering payer has to ask a Solana next hop where its
+    /// claims stand before it can sign one. Widening the parameter is safe
+    /// precisely because neither layout can be mistaken for the other:
+    /// each opens with its own domain tag, and
+    /// `SOLANA_CHALLENGE_DOMAIN_TAG` is documented as chosen to be neither
+    /// the same length as nor a prefix/suffix of a balance-proof message,
+    /// so a captured challenge is not replayable as a payment.
+    fn sign(&self, message: &[u8]) -> [u8; 64];
 }
 
 /// A [`Ed25519Signer`] that holds an ed25519 key pair directly in process
@@ -62,7 +76,7 @@ impl Ed25519Signer for LocalEd25519Signer {
         self.keypair.public.to_bytes()
     }
 
-    fn sign(&self, message: &[u8; 48]) -> [u8; 64] {
+    fn sign(&self, message: &[u8]) -> [u8; 64] {
         self.keypair.sign(message).to_bytes()
     }
 }
@@ -91,12 +105,14 @@ mod tests {
         let signer = LocalEd25519Signer::from_secret_bytes([3u8; 32]).unwrap();
         let channel_account = [9u8; 32];
         let signature = signer.sign(&crate::solana_balance_proof_message(
+            &[9u8; 32],
             &channel_account,
             4,
             500,
         ));
 
         assert!(verify_solana_balance_proof(
+            &[9u8; 32],
             &channel_account,
             4,
             500,
@@ -111,12 +127,14 @@ mod tests {
         let other = LocalEd25519Signer::from_secret_bytes([4u8; 32]).unwrap();
         let channel_account = [9u8; 32];
         let signature = signer.sign(&crate::solana_balance_proof_message(
+            &[9u8; 32],
             &channel_account,
             4,
             500,
         ));
 
         assert!(!verify_solana_balance_proof(
+            &[9u8; 32],
             &channel_account,
             4,
             500,

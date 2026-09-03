@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bs58 = "0.5"
 connector-btp = { path = "../connector-btp" }
 connector-config = { path = "../connector-config" }
 connector-domain = { path = "../connector-domain" }

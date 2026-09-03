@@ -6,12 +6,18 @@
 //! its production implementation over `tokio-tungstenite` -- the same 0.20
 //! the client edge's own BTP integration test already speaks.
 //!
-//! # `wss://` only
+//! # `wss://`, and `ws://` only where an operator has opted in
 //!
 //! A peering carries signed balance proofs (ADR 0004), so the scheme that
-//! selects this carriage is `wss://` and nothing else. `ws://` selects no
-//! carriage at all and `connector-config` refuses it at load
-//! (`PeerEndpointScheme`); this module never sees one.
+//! selects this carriage in any deployed config is `wss://`. `ws://` is
+//! [`connector_config::ConfigError::PeerEndpointScheme`] at load unless
+//! the node set `peer_allow_plaintext_endpoints` (issue #678's gap 3), in
+//! which case it names the same carriage without TLS and reaches here --
+//! `connect_async` speaks both, and everything above this line is identical
+//! either way. `local/mixed-chain`'s `a-b` peering is that case, and since
+//! issue #1155 it is how the shipped image is proven to carry a packet over
+//! BTP at all; a node taking the opt-in logs a WARN naming every such
+//! peering at startup, `ws://` and `http://` alike.
 //!
 //! # Symmetry, without inferring a role from having dialed (§2.3, §1.3)
 //!

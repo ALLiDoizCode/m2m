@@ -1,6 +1,19 @@
 # A peer PREPARE arrives with its covering claim, or it is greeted
 
+**Status:** Superseded by [0042](0042-a-packet-carries-its-claim.md) — **entirely, not amended**. Every clause of its Decision was false of the shipped binary. Kept for the reasoning that produced the rule, and for the record that its claim to leave [0004](0004-value-moves-on-fulfilment.md)'s anti-prepay argument undisturbed was itself wrong.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
+> **Superseded entirely by [ADR 0042](0042-a-packet-carries-its-claim.md).** Every clause of the
+> Decision below was false of the shipped binary: an uncovered arrival was refused only at a
+> _priced_ termination, no connector has ever covered a PREPARE it sends (issue #881 was never
+> wired), `ClaimEnforcement::Observe` was an escape hatch this record says does not exist (it has
+> since been deleted — ADR 0042 item 4, issue #1077 — but it existed for the whole time this record
+> claimed it did not), and the
+> credit window it declares retired is the only mode that runs. Its claim that ADR 0004's
+> argument against prepay "remains sound and is not disturbed here" is also wrong — that argument
+> _is_ disturbed, deliberately, and ADR 0042 states the trade instead of leaving it silent. Read
+> below for the reasoning that produced the rule, not for the rule.
 
 **Owner decision, 2026-08-07 (issue #868):** a peer-role PREPARE may not arrive without a covering
 claim. Every packet is paid, or it gets the x402 greeting — the same rule the client edge already
@@ -56,7 +69,7 @@ all.
 
 [ADR 0004](0004-value-moves-on-fulfilment.md) established that value is owed on fulfilment, so a
 claim can only follow the fulfilment that created the obligation: "the claim covering it follows the
-fulfilment rather than riding the outgoing PREPARE." `peer-wire-spec.md` §3.2 is the mechanism that
+fulfilment rather than riding the outgoing PREPARE." `peer-semantics-pre-868.md` §3.2 is the mechanism that
 falls out of it — the claim rides the **next** frame to that peer, and the flush timer (§3.3) bounds
 how long the last packet of a burst stays uncovered. `T04`'s ceiling (§5.3) bounds how much
 uncovered value accumulates in the meantime. That window — trailing exposure, bounded by a timer and
@@ -138,8 +151,9 @@ receivers (the B2 refusal behaviour) roll to any — a receiver that refuses bef
 can cover is a hard outage, and the safe order is stated and justified, not assumed. A temporary
 per-peering `claim_enforcement` config knob (`connector-config::peer::ClaimEnforcement`, default
 `Enforce`) lets a receiver `Observe` — admit and log an uncovered PREPARE rather than refuse it — as
-a canary step before a box is flipped to enforce; it is dated for removal once the fleet-wide
-rollout is confirmed. The three-box fleet runbook, its config dry-run recipe and its positive-evidence
+a canary step before a box is flipped to enforce; it was dated for removal once the fleet-wide
+rollout is confirmed, and **has since been removed** (ADR 0042 item 4, issue #1077) — the key is now
+parsed only to be rejected by name, and a terminated arrival is refused unconditionally. The three-box fleet runbook, its config dry-run recipe and its positive-evidence
 checks are `docs/operators/claim-policy-rollout.md`.
 
 **The exposure machinery's remaining purpose is undecided here.** `record_inbound_delivery`

@@ -3,24 +3,22 @@
 //!
 //! # An interaction is one request (§1.1)
 //!
-//! That is the whole difference from [`connector_peer_btp::accept`]'s
-//! session. There is no role to bind for a lifetime, no second `auth` frame
-//! to refuse, and no pre-auth frame to keep from being reclassified --
-//! because there is nothing to reclassify. What replaces all of it is one
-//! sentence: **the credential MUST be presented on every request** (§1.4),
-//! and "a request without it is a client request, whatever the previous
-//! request from the same connection carried".
+//! Which is now barely a difference at all. Role is a property of the
+//! **frame** on either carriage (§1.5, as amended by #868): each arrival
+//! stands on the claim it carries, and there is nothing session-lived on
+//! either side for a role to outlive. What HTTP still has that BTP does not
+//! is that a request is answered exactly once and always, which is what
+//! bounds the claim ack structurally (§6.3).
 //!
-//! What *is* the same, and is called rather than re-derived:
+//! What is called rather than re-derived:
 //!
-//! * [`connector_peer_auth::decide_role`] owns §1.2's P1/P2 rule, and its
-//!   [`RoleDecision`](connector_peer_auth::RoleDecision) carries the role and
-//!   the `peer_auth_refused` event together, so the silent downgrade cannot
-//!   ship without the loud event;
-//! * **ambiguous credentials are refused, not resolved** -- more than one
-//!   `Toon-Peer-Auth` header is a `400` with no ILP body, never first-wins,
-//!   last-wins or a concatenation. This is the header-smuggling defence, and
-//!   [`connector_peer_auth::present_base64`] counts before it parses;
+//! * [`connector_peer_btp::role_gate::decide`] joins §1.2's P2/P3 rule to
+//!   the claim book's verdict on a signature, and is the same call the BTP
+//!   carriage makes, so §0.1's one pipeline cannot admit over one carriage
+//!   what it refuses over the other. Its
+//!   [`RoleDecision`](connector_peer_auth::RoleDecision) carries the role
+//!   and the `peer_auth_refused` event together, so the silent downgrade
+//!   cannot ship without the loud event;
 //! * the claim, its verdict and the per-relation watermark ledger are
 //!   `connector-peer-btp`'s ([`AcceptedClaims`]), because §2.5/I6 make them
 //!   per **peering relation**, never per carriage -- a peering with two paths
@@ -39,8 +37,16 @@
 //! and no `Toon-Claim-Ack` is emitted. Falling a client-role request
 //! through to `connector-client-edge` instead of
 //! answering it `F02` is the bring-up wiring of issue #678; what §1 requires
-//! of *this* module is that role is decided by the credential and that a
-//! client can never reach peer handling, and that holds either way.
+//! of *this* module is that role is decided by the request's verified claim
+//! and that a client can never reach peer handling, and that holds either
+//! way.
+//!
+//! # `Toon-Peer-Auth` is ignored, not refused
+//!
+//! ADR 0060 deleted the `{peerId, secret}` credential that header carried.
+//! A request still setting one is read exactly as one that does not -- no
+//! `400`, no log line, no branch -- so the two ends of a peering may be
+//! upgraded in either order without the peering going dark mid-flight.
 //!
 //! # The accept-only side (§6.4)
 //!
@@ -64,16 +70,17 @@ use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 
 use connector_btp::{
-    ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, FLUSH_REQUESTED_HEADER, PAYMENT_REQUIRED_HEADER,
+    ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, CLAIM_HEADER, FLUSH_REQUESTED_HEADER,
+    PAYMENT_REQUIRED_HEADER,
 };
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 use connector_peer_auth::{
-    claim_ack_to_emit, decide_role, present_base64, Capability, PeerAuthPolicy, PeerAuthRefusalLog,
-    SessionRole, PEER_AUTH_HEADER,
+    claim_ack_to_emit, Capability, PeerAuthPolicy, PeerAuthRefusal, PeerAuthRefusalLog, SessionRole,
 };
 use connector_peer_btp::claim_json::{self};
 use connector_peer_btp::price_gate::{self, ClaimEnforcementPolicy, PaymentRequired};
-use connector_peer_btp::{fields, AcceptedClaims};
+use connector_peer_btp::role_gate;
+use connector_peer_btp::AcceptedClaims;
 use connector_runtime::{ClaimAckOutcome, Connector, WireClaim};
 
 use crate::headers::{self, PeerRequest, PeerResponse};
@@ -82,7 +89,7 @@ use crate::headers::{self, PeerRequest, PeerResponse};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PeerHttpPolicy {
     /// §1.10's bounded escape hatch: a **dedicated peer listener with
-    /// mandatory authentication**. Role is *still* decided by P1 and P2 --
+    /// mandatory authentication**. Role is *still* decided by P2 and P3 --
     /// the listener is defence in depth and MUST NOT become the decider, so
     /// §1.3 holds in full either way. What changes is only what happens to a
     /// request that fails: on a dedicated listener it is refused outright
@@ -90,9 +97,9 @@ pub struct PeerHttpPolicy {
     /// because such a listener serves no clients -- there is no client to
     /// downgrade to and no oracle to leak.
     ///
-    /// `false` (the default) is the shared-listener reading: a failed
-    /// credential is an ordinary client, per §1.6's "MUST NOT refuse it for
-    /// the assertion alone".
+    /// `false` (the default) is the shared-listener reading: a request whose
+    /// claim does not verify is an ordinary client request, per §1.6's "MUST
+    /// NOT refuse it for the assertion alone".
     pub mandatory_auth: bool,
 }
 
@@ -195,47 +202,22 @@ impl PeerHttpState {
     /// claim is decoded, before a watermark is consulted, before a packet is
     /// routed, and before any fee or journal accounting.
     pub async fn handle(&self, request: PeerRequest) -> PeerResponse {
-        // §1.5's header-smuggling defence. Refused, not resolved: never the
-        // first, never the last, never a concatenation, and counted before
-        // anything is parsed so a second undecodable header cannot be
-        // discarded to leave one unambiguous credential standing.
-        let presented = match present_base64(
-            request
-                .headers
-                .get_all(PEER_AUTH_HEADER)
-                .into_iter()
-                .map(str::as_bytes),
-        ) {
-            Ok(presented) => presented,
-            // `400`, with no ILP body (§1.5).
-            Err(_) => return PeerResponse::refused(400),
-        };
-
-        let (role, refusal) = decide_role(presented.as_ref(), &self.auth).into_parts();
-
-        // §1.6: the loud half. A credential naming a configured peer that
-        // fails P1 or P2 is an *assertion*; the request is a client and is
-        // not refused for the assertion alone -- refusing would make the
-        // check an oracle for which peer ids this connector has configured --
-        // but a silent downgrade would present to an operator as "peering
-        // configured, nothing peers, no error anywhere". The rate-limited
-        // event is what stops that.
-        if let Some(refusal) = refusal {
-            let report = self
-                .refusals
-                .lock()
-                .expect("peer auth refusal log poisoned")
-                .observe(&refusal, now_ms());
-            if let Some(report) = report {
-                tracing::warn!(
-                    event = report.event,
-                    peer_id = %report.peer_id,
-                    unmet = report.unmet.name(),
-                    suppressed = report.suppressed,
-                    "peer credential asserted but not proven; the interaction is a client"
-                );
-            }
+        // §1.5's smuggling defence, counted before anything is parsed: more
+        // than one claim header on one request is refused, not resolved --
+        // never the first, never the last, never a concatenation. `400`,
+        // with no ILP body.
+        if request.headers.get_all(CLAIM_HEADER).len() > 1 {
+            return PeerResponse::refused(400);
         }
+
+        // **Role, from this request's own claim** (§1.2, §1.5): decoded and
+        // verified before anything is judged, routed, charged or journaled.
+        // Decoded once, here, and reused for the price-coverage check
+        // further down.
+        let claim = claim_on(&request);
+        let (role, refusal) =
+            role_gate::decide(&self.connector, &self.auth, claim.as_ref()).into_parts();
+        self.report_refusal(refusal.as_ref());
 
         // §1.10: on a dedicated peer listener a failure is refused outright
         // rather than downgraded, because such a listener serves no clients.
@@ -243,19 +225,24 @@ impl PeerHttpState {
             return PeerResponse::refused(401);
         }
 
-        // Decoded once, here, for the price-coverage check further down --
-        // and only for a peer, since §1.5 does not read a client's claim at
-        // all. Its watermark is read *before* `judge_claim` below may record
-        // this very claim, so that check judges the claim's own advance past
-        // the watermark it rode in on, not the one it just became (issue
-        // #880).
-        let claim = role.peer_id().and_then(|_| claim_on(&request));
+        // The watermark is read *before* `judge_claim` below may advance
+        // it, so that check judges the claim's own advance past the
+        // watermark it rode in on, not the one it just became (issue #880).
+        //
+        // It is read from the book that is about to judge the claim --
+        // `ClaimBook`'s own durable inbound watermark, keyed by channel as
+        // that book keys it -- and never from `AcceptedClaims`, which is
+        // in-memory and per-process. Reading the per-process record made
+        // coverage disagree with the judgement across a restart: the book
+        // replays its journal and the record does not, so the first priced
+        // peer PREPARE after a restart was credited with its claim's whole
+        // cumulative amount as new payment (issue #1104).
         let prior_watermark = role
             .peer_id()
-            .zip(claim.as_ref())
-            .and_then(|(peer_id, claim)| self.accepted.watermark(peer_id, &claim.channel_id));
+            .and(claim.as_ref())
+            .and_then(|claim| self.connector.peer_channel_watermark(&claim.channel_id));
 
-        let ack = self.judge_claim(&role, &request);
+        let ack = self.judge_claim(&role, claim.as_ref());
 
         // FLUSH (§3): a POST with an **empty ILP body** plus the claim
         // header. The ack rides the response that already answers it -- HTTP
@@ -291,32 +278,18 @@ impl PeerHttpState {
             }
         };
 
-        let minimum_delivery = match headers::minimum_delivery(&role, &request.headers) {
-            Ok(minimum_delivery) => minimum_delivery,
-            // §5.1: never silently zero. The claim's verdict rides this
-            // REJECT anyway -- the two answers are independent (§6.2).
-            Err(error) => {
-                return self.finish(
-                    &role,
-                    packet_response(PacketResponse::Reject(
-                        fields::malformed_minimum_delivery_reject(&error),
-                    )),
-                    ack,
-                )
-            }
-        };
-
-        // Issue #880 (owner decision #868): a peer PREPARE to a route this
-        // connector terminates and prices carries a covering claim, or it
-        // is refused with the client edge's own x402 greeting. The decision
-        // is `connector_peer_btp::price_gate`'s, shared with the BTP
-        // carriage so §0.1's one pipeline cannot admit over one carriage
+        // Issue #880 (owner decision #868) and ADR 0042: a peer PREPARE
+        // carries a covering claim -- the route's `price` where this
+        // connector terminates, the packet's own `amount` where it forwards
+        // -- or it is refused with the client edge's own x402 greeting. The
+        // decision is `connector_peer_btp::price_gate`'s, shared with the
+        // BTP carriage so §0.1's one pipeline cannot admit over one carriage
         // what it refuses over the other; what is this carriage's is only
         // the response the refusal is shaped into.
         if let Some(refusal) = price_gate::payment_required(
             &self.connector,
             &peer_id,
-            &prepare.destination,
+            &prepare,
             ack,
             claim.as_ref(),
             prior_watermark,
@@ -329,45 +302,46 @@ impl PeerHttpState {
         // arrived over HTTP is indistinguishable here from one that arrived
         // over BTP. `handle_peer_prepare` is handed no claim -- this
         // request's was judged above, before anything was routed.
-        let (response, _) = self
-            .connector
-            .handle_peer_prepare(prepare, minimum_delivery, None)
-            .await;
+        let (response, _) = self.connector.handle_peer_prepare(prepare, None).await;
         self.finish(&role, packet_response(response), ack)
     }
 
-    /// A claim's verdict, or [`ClaimAckOutcome::NotSent`] when there was no
-    /// claim to judge, it could not be read, or the request was a client's.
-    fn judge_claim(&self, role: &SessionRole, request: &PeerRequest) -> ClaimAckOutcome {
-        // §1.5: a client's claim is not judged here at all -- the peer
-        // namespace is not reachable from a client interaction (§1.8), and
-        // §1.3 forbids letting "a claim naming a channel that happens to be
-        // in `[[peer_channels]]`" argue otherwise.
-        let Some(peer_id) = role.peer_id() else {
-            return ClaimAckOutcome::NotSent;
+    /// §1.6's loud half. A claim naming a configured peer channel that
+    /// fails P2 or P3 is an *assertion*; the request is a client request and
+    /// is not refused for the assertion alone -- refusing would make the
+    /// check an oracle for which peerings this connector has configured --
+    /// but a silent downgrade would present to an operator as "peering
+    /// configured, nothing peers, no error anywhere". The rate-limited event
+    /// is what stops that.
+    fn report_refusal(&self, refusal: Option<&PeerAuthRefusal>) {
+        let Some(refusal) = refusal else {
+            return;
         };
-        let Some(raw) = headers::claim_json(&request.headers) else {
-            return ClaimAckOutcome::NotSent;
-        };
-        let raw = match raw {
-            Ok(raw) => raw,
-            Err(_) => {
-                tracing::warn!(peer_id, "peer claim header is not base64; not acknowledged");
-                return ClaimAckOutcome::NotSent;
-            }
-        };
+        let report = self
+            .refusals
+            .lock()
+            .expect("peer auth refusal log poisoned")
+            .observe(refusal, now_ms());
+        if let Some(report) = report {
+            tracing::warn!(
+                event = report.event,
+                peer_id = %report.peer_id,
+                unmet = report.unmet.name(),
+                suppressed = report.suppressed,
+                "a peer channel's claim did not verify; the request is a client request"
+            );
+        }
+    }
 
-        let claim = match claim_json::parse(&raw) {
-            Ok(claim) => claim,
-            // Not one of §6.1's four reasons -- those judge a claim this
-            // connector could read. An undecodable one is *not acknowledged*
-            // (§6.3): no header rides the response, the payer's claim stays
-            // pending, and its retransmission is read the same way rather
-            // than being recorded as a verdict that was never reached.
-            Err(error) => {
-                tracing::warn!(peer_id, %error, "peer claim could not be decoded; not acknowledged");
-                return ClaimAckOutcome::NotSent;
-            }
+    /// A claim's verdict, or [`ClaimAckOutcome::NotSent`] when there was no
+    /// readable claim to judge or the request was a client's.
+    fn judge_claim(&self, role: &SessionRole, claim: Option<&WireClaim>) -> ClaimAckOutcome {
+        // §1.5: a client's claim is not judged here at all -- the peer
+        // namespace is not reachable from a client interaction (§1.8). A
+        // request whose claim did not verify *is* a client request, so this
+        // is also what keeps a bad signature from touching a watermark.
+        let (Some(peer_id), Some(claim)) = (role.peer_id(), claim) else {
+            return ClaimAckOutcome::NotSent;
         };
 
         // §6.3's idempotent re-ack, checked **before** the claim reaches the
@@ -377,13 +351,13 @@ impl PeerHttpState {
         // permanently, since the payer's only honest retransmission would be
         // refused forever and minting a higher nonce for the same cumulative
         // is explicitly forbidden.
-        if self.accepted.is_at_watermark(peer_id, &claim) {
+        if self.accepted.is_at_watermark(peer_id, claim) {
             return ClaimAckOutcome::Accepted;
         }
 
         let ack = self.connector.handle_peer_claim(claim.clone());
         if ack == ClaimAckOutcome::Accepted {
-            self.accepted.record(peer_id, &claim);
+            self.accepted.record(peer_id, claim);
         }
         ack
     }
@@ -467,12 +441,28 @@ fn now_ms() -> u64 {
 }
 
 /// The claim a peer request carries, decoded -- exposed so a caller that
-/// wants to know what a request *would* be judged on does not have to
-/// re-derive the header layer. Judging it is [`PeerHttpState::handle`]'s.
+/// wants to know what a request *would* be judged on, or what role it
+/// proves, does not have to re-derive the header layer. Judging it is
+/// [`PeerHttpState::handle`]'s.
+///
+/// `None` when the request carries no claim header at all, and also when it
+/// carries one this connector could not read: an undecodable claim is *not
+/// acknowledged* (§6.3) rather than rejected, so the payer's claim stays
+/// pending and its retransmission is read the same way instead of being
+/// recorded as a verdict that was never reached.
 #[must_use]
 pub fn claim_on(request: &PeerRequest) -> Option<WireClaim> {
     match headers::claim_json(&request.headers)? {
-        Ok(raw) => claim_json::parse(&raw).ok(),
-        Err(_) => None,
+        Ok(raw) => claim_json::parse(&raw)
+            .inspect_err(|error| {
+                // No peer id to name: the claim *is* what would have named
+                // one, and it did not decode.
+                tracing::warn!(%error, "peer claim could not be decoded; not acknowledged");
+            })
+            .ok(),
+        Err(_) => {
+            tracing::warn!("peer claim header is not base64; not acknowledged");
+            None
+        }
     }
 }

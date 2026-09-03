@@ -1,25 +1,28 @@
 //! **Accept**: an inbound peer BTP session, from its websocket upgrade to
 //! its close (`peer-carriage-spec.md` §1, §3, §6, §7.1).
 //!
-//! This module owns the session-lifetime rules
-//! [`connector_peer_auth`] deliberately cannot, because that crate can see
-//! one credential and no session:
+//! # Role is a property of the frame, not of the session (§1.5)
 //!
-//! * **Role is bound once, at auth, and is immutable for the session's
-//!   lifetime** (§1.5). A session starts `client` -- that is
-//!   [`SessionRole`]'s `Default`, not a third state -- and becomes `peer`
-//!   only when an `auth` entry satisfying P1 and P2 is evaluated.
-//! * **A second `auth` entry on an already-bound session is an ERROR, not
-//!   an escalation.** `F00 NotAcceptedError`, role unchanged. That is the
-//!   escalation path §1.5 closes, and [`SessionRoleBinding::bind`]
-//!   refusing a second bind is what makes forgetting it a compile-visible
-//!   `Result` rather than a silent re-evaluation.
-//! * **Frames processed before the role is bound are client frames and are
-//!   never retroactively reclassified.** A claim ingested as a client claim
-//!   stays a client claim.
-//! * **Ambiguous credentials are refused, not resolved** -- more than one
-//!   `auth` entry on one frame is an ERROR, never first-wins or last-wins.
-//!   [`connector_peer_auth::present_raw`] counts before it parses.
+//! This session binds nothing. Until ADR 0060 it bound a role once, at the
+//! `auth` frame, from a `{peerId, secret}` shared secret, and every later
+//! frame on the socket rode that one decision. The secret is deleted, and
+//! §1.5 inverted with it: **each frame stands on the claim it carries**,
+//! and a frame carrying no claim that satisfies P2 and P3 is a client frame
+//! however many peer frames preceded it here. That is strictly narrower
+//! than the rule it replaces -- a session could previously prove itself
+//! once and then send anything.
+//!
+//! What follows from it:
+//!
+//! * **A claim ingested as a client claim stays a client claim.** There is
+//!   no history to rewrite: the role answers what *this* frame is, and
+//!   §1.8's namespace disjointness is what keeps that safe.
+//! * **An `auth` entry means nothing here.** A receiver ignores one rather
+//!   than answering an ERROR (ADR 0060), so the two ends of a peering may
+//!   be upgraded in either order without going dark mid-flight. A MESSAGE
+//!   carrying nothing but an `auth` entry is answered with the same empty
+//!   RESPONSE it always was -- through the ordinary claimless-frame path,
+//!   not through a branch that knows the entry's name.
 //!
 //! # Ordering (§7.1)
 //!
@@ -47,8 +50,8 @@
 //! onto the *shared* client listener, so that a client-role session falls
 //! through to `connector-client-edge` instead, is the bring-up wiring of
 //! issue #678; what §1 requires of this crate is that role is decided by
-//! the credential and that a client can never reach peer handling, and
-//! that holds either way.
+//! the frame's verified claim and that a client can never reach peer
+//! handling, and that holds either way.
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -56,20 +59,19 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use connector_btp::{
     decode_frame, encode_error, encode_response, reply, BtpDecodeError, BtpSessionHandle,
-    OutboundRequests, ProtocolData, SessionGone, AUTH_PROTOCOL, BTP_ERROR, BTP_MESSAGE,
-    BTP_RESPONSE, BTP_TRANSFER,
+    OutboundRequests, ProtocolData, SessionGone, BTP_ERROR, BTP_MESSAGE, BTP_RESPONSE,
+    BTP_TRANSFER,
 };
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 use connector_peer_auth::{
-    claim_ack_to_emit, decide_role, present_raw, PeerAuthPolicy, PeerAuthRefusalLog, SessionRole,
-    SessionRoleBinding, PEER_AUTH_PROTOCOL_ENTRY,
+    claim_ack_to_emit, PeerAuthPolicy, PeerAuthRefusal, PeerAuthRefusalLog, SessionRole,
 };
 use connector_runtime::{ClaimAckOutcome, Connector, WireClaim};
 use tokio::sync::mpsc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::price_gate::{self, ClaimEnforcementPolicy, PaymentRequired};
-use crate::{ack, claim_json, fields};
+use crate::{ack, claim_json, fields, role_gate};
 
 /// How many completed replies may queue for the socket's writer before a
 /// finishing frame waits its turn -- burst smoothing between out-of-order
@@ -86,17 +88,17 @@ pub const DEFAULT_PEER_SESSION_WINDOW: u32 = 16;
 #[derive(Debug, Clone, Copy)]
 pub struct PeerAcceptPolicy {
     /// §1.10's bounded escape hatch: a **dedicated peer listener with
-    /// mandatory authentication**. Role is *still* decided by P1 and P2 --
+    /// mandatory authentication**. Role is *still* decided by P2 and P3 --
     /// the listener is defence in depth and MUST NOT become the decider,
     /// so §1.3 holds in full either way. What changes is only what happens
-    /// to an interaction that fails: on a dedicated listener it is refused
+    /// to a frame that fails: on a dedicated listener it is refused
     /// outright (ERROR, then close) rather than downgraded to client, and
     /// that is safe *only* because such a listener serves no clients --
     /// there is no client to downgrade to and no oracle to leak.
     ///
-    /// `false` (the default) is the shared-listener reading: a failed
-    /// credential is an ordinary client, per §1.6's "MUST NOT refuse it for
-    /// the assertion alone".
+    /// `false` (the default) is the shared-listener reading: a frame whose
+    /// claim does not verify is an ordinary client frame, per §1.6's "MUST
+    /// NOT refuse it for the assertion alone".
     pub mandatory_auth: bool,
     /// How many frames may be past admission and not yet answered (§7.1).
     pub session_window: NonZeroU32,
@@ -144,6 +146,19 @@ impl Default for PeerAcceptPolicy {
 /// the payer's next fulfilment produces a genuinely newer claim --
 /// recovering it belongs with the claim journal's own durability (ADR
 /// 0005), not with a carriage.
+///
+/// # What it is *not*: the money baseline
+///
+/// That cost is tolerable for the re-ack above, which is a per-relation,
+/// per-process question, and is **not** tolerable for anything arithmetic.
+/// The price-coverage gate (issue #880) read its prior watermark from here
+/// and so measured a claim's advance against a record that a restart had
+/// zeroed while `ClaimBook` had replayed its journal: the first priced peer
+/// PREPARE after a payee restart was credited with its claim's whole
+/// cumulative amount as new payment (issue #1104). Coverage now reads
+/// [`connector_runtime::Connector::peer_channel_watermark`] -- the book
+/// that actually judges the claim -- and this record answers the re-ack
+/// alone.
 #[derive(Debug, Default)]
 pub struct AcceptedClaims {
     /// `(peer id, canonical channel id)` → the claim at that watermark.
@@ -179,11 +194,19 @@ impl AcceptedClaims {
     }
 
     /// This relation's watermark for `channel_id` (domain
-    /// [`connector_domain::Watermark`]), `None` if no claim has ever been
-    /// recorded for it -- the same "nothing to advance past" case
-    /// [`connector_domain::validate_price`] already treats as watermark
-    /// zero. Read *before* [`Self::record`] to get the watermark a fresh
-    /// claim must advance past, not the one it just became (issue #880).
+    /// [`connector_domain::Watermark`]) *as this process has seen it*,
+    /// `None` if no claim has been recorded for it since this process
+    /// started.
+    ///
+    /// **Never a baseline for money arithmetic.** `None` here does not mean
+    /// "nothing has ever been claimed on this channel", only "not since
+    /// this process started", and treating the two as the same is issue
+    /// #1104. Anything measuring a claim's *advance* -- the price-coverage
+    /// gate above all -- reads
+    /// [`connector_runtime::Connector::peer_channel_watermark`], which is
+    /// [`connector_runtime::ClaimBook`]'s own durable figure and the one
+    /// the claim is about to be judged against. What this answers is what
+    /// this record is for: what one relation has observed in one process.
     #[must_use]
     pub fn watermark(
         &self,
@@ -234,12 +257,15 @@ impl PeerCarriageState {
     }
 }
 
-/// One inbound peer session: its role binding, its outbound `requestId`
-/// space (§2.3 -- after auth either side may originate on the one session),
-/// and its in-flight window.
+/// One inbound peer session: its outbound `requestId` space (§2.3 -- a BTP
+/// session is symmetric once established, so either side may originate on
+/// it) and its in-flight window.
+///
+/// It holds no role. Role is a property of the frame (§1.5), decided from
+/// the claim each frame carries, so there is nothing session-lived left to
+/// keep here.
 pub struct PeerSession {
     state: Arc<PeerCarriageState>,
-    binding: SessionRoleBinding,
     outbound: Arc<OutboundRequests>,
     replies: mpsc::Sender<Vec<u8>>,
     window: Arc<Semaphore>,
@@ -252,8 +278,8 @@ pub enum SessionEnd {
     Closed,
     /// The socket's send half is gone; nothing further could be answered.
     Gone,
-    /// §1.10: a dedicated peer listener refused an interaction that failed
-    /// P1 or P2, and closed.
+    /// §1.10: a dedicated peer listener refused a frame that failed P2 or
+    /// P3, and closed.
     Refused,
 }
 
@@ -279,7 +305,6 @@ impl PeerSession {
         let window = Arc::new(Semaphore::new(state.policy.session_window.get() as usize));
         PeerSession {
             state,
-            binding: SessionRoleBinding::new(),
             outbound,
             replies,
             window,
@@ -294,13 +319,6 @@ impl PeerSession {
     #[must_use]
     pub fn handle(&self) -> BtpSessionHandle {
         BtpSessionHandle::new(self.replies.clone(), Arc::clone(&self.outbound))
-    }
-
-    /// This session's role. `client` until an `auth` entry proving P1 and
-    /// P2 binds it, and immutable thereafter.
-    #[must_use]
-    pub fn role(&self) -> &SessionRole {
-        self.binding.role()
     }
 
     /// Read frames until the peer closes or the socket dies.
@@ -346,121 +364,49 @@ impl PeerSession {
             return Ok(None);
         }
 
-        let auth_entries: Vec<&[u8]> = frame
-            .protocol_data
-            .iter()
-            .filter(|pd| pd.name == PEER_AUTH_PROTOCOL_ENTRY)
-            .map(|pd| pd.data.as_slice())
-            .collect();
-        if !auth_entries.is_empty() {
-            debug_assert_eq!(PEER_AUTH_PROTOCOL_ENTRY, AUTH_PROTOCOL);
-            return self.handle_auth(frame.request_id, auth_entries).await;
-        }
-
-        match frame.frame_type {
-            // FLUSH (§3): a TRANSFER whose `amount` is the claim's new
-            // cumulative, carrying the claim and **no** `ilpPacket`.
-            BTP_TRANSFER => {
-                self.handle_flush(frame.request_id, frame.amount, &frame.protocol_data)
-                    .await?;
-                Ok(None)
-            }
-            BTP_MESSAGE => {
-                self.handle_message(frame.request_id, &frame.protocol_data, &frame.ilp_packet)
-                    .await?;
-                Ok(None)
-            }
-            // A frame type this grammar does not have. Ignored rather than
-            // errored: the carriage stays additively extensible (§3).
-            _ => Ok(None),
-        }
-    }
-
-    async fn send(&self, frame: Vec<u8>) -> Result<(), SessionGone> {
-        reply(&self.replies, frame).await
-    }
-
-    /// §1.4/§1.5: the credential, evaluated exactly once per session.
-    async fn handle_auth(
-        &mut self,
-        request_id: u32,
-        entries: Vec<&[u8]>,
-    ) -> Result<Option<SessionEnd>, SessionGone> {
-        // A session whose role is already bound does not re-evaluate.
-        // Re-authentication mid-session is the escalation path §1.5
-        // closes, and the answer is an ERROR with the role left alone.
-        if self.binding.is_bound() {
-            self.send(encode_error(
-                request_id,
-                "F00",
-                "NotAcceptedError",
-                b"role is already bound for this session; re-authentication is refused",
-            ))
-            .await?;
+        // A frame type this grammar does not have. Ignored rather than
+        // errored: the carriage stays additively extensible (§3). An `auth`
+        // entry riding one of the two it does have is ignored the same way
+        // and for the same reason -- ADR 0060 deleted the credential, and a
+        // receiver that answered `400`/ERROR to an arriving one would make
+        // the two ends of a peering un-upgradable in either order.
+        if frame.frame_type != BTP_TRANSFER && frame.frame_type != BTP_MESSAGE {
             return Ok(None);
         }
 
-        // More than one `auth` entry on one frame: refused, not resolved.
-        // Never the first, never the last, never a concatenation -- this
-        // is the credential-smuggling defence, and its absence is how
-        // "which credential did we check?" becomes unanswerable.
-        let presented = match present_raw(entries) {
-            Ok(presented) => presented,
+        // §1.5's smuggling defence, counted before anything is parsed:
+        // more than one claim entry on one frame is refused, not resolved
+        // -- never the first, never the last, never a concatenation.
+        let raw = match claim_json::present_from_protocol_data(&frame.protocol_data) {
+            Ok(raw) => raw,
             Err(_) => {
                 self.send(encode_error(
-                    request_id,
+                    frame.request_id,
                     "F00",
                     "NotAcceptedError",
-                    b"more than one auth entry on one frame",
+                    b"more than one claim entry on one frame",
                 ))
                 .await?;
                 return Ok(None);
             }
         };
 
-        let decision = decide_role(presented.as_ref(), &self.state.auth);
-        let (role, refusal) = decision.into_parts();
-
-        // §1.6: the loud half. A credential naming a configured peer that
-        // fails P1 or P2 is an *assertion*; the interaction is a client and
-        // is not refused for the assertion alone -- refusing would make the
-        // check an oracle for which peer ids this connector has configured
-        // -- but a silent downgrade would present to an operator as
-        // "peering configured, nothing peers, no error anywhere". The
-        // rate-limited event is what stops that.
-        if let Some(refusal) = refusal {
-            let report = self
-                .state
-                .refusals
-                .lock()
-                .expect("peer auth refusal log poisoned")
-                .observe(&refusal, now_ms());
-            if let Some(report) = report {
-                tracing::warn!(
-                    event = report.event,
-                    peer_id = %report.peer_id,
-                    unmet = report.unmet.name(),
-                    suppressed = report.suppressed,
-                    "peer credential asserted but not proven; the interaction is a client"
-                );
-            }
-        }
-
-        let is_peer = role.is_peer();
-        // `bind` cannot fail here -- `is_bound` was checked above -- but it
-        // is a `Result` so that forgetting the check is a compile-visible
-        // omission rather than a silent second evaluation.
-        if self.binding.bind(role).is_err() {
-            return Ok(None);
-        }
+        // **Role, from this frame's own claim** (§1.2, §1.5): decoded and
+        // verified before anything is judged, routed, charged or journaled,
+        // and re-decided on every frame because a claim proves the frame it
+        // rides on and no other.
+        let claim = raw.and_then(|raw| self.decode_claim(raw));
+        let (role, refusal) =
+            role_gate::decide(&self.state.connector, &self.state.auth, claim.as_ref()).into_parts();
+        self.report_refusal(refusal.as_ref());
 
         // §1.10: on a dedicated peer listener a failure is refused
         // outright rather than downgraded, because such a listener serves
         // no clients -- there is no client to downgrade to and no oracle to
         // leak.
-        if self.state.policy.mandatory_auth && !is_peer {
+        if self.state.policy.mandatory_auth && !role.is_peer() {
             self.send(encode_error(
-                request_id,
+                frame.request_id,
                 "F00",
                 "NotAcceptedError",
                 b"this listener serves peers only",
@@ -469,11 +415,70 @@ impl PeerSession {
             return Ok(Some(SessionEnd::Refused));
         }
 
-        // The same empty RESPONSE the client edge answers an `auth` frame
-        // with: received, nothing more to say. The role decision is not
-        // disclosed, on either outcome.
-        self.send(encode_response(request_id, &[], &[])).await?;
-        Ok(None)
+        match frame.frame_type {
+            // FLUSH (§3): a TRANSFER whose `amount` is the claim's new
+            // cumulative, carrying the claim and **no** `ilpPacket`.
+            BTP_TRANSFER => {
+                self.handle_flush(frame.request_id, frame.amount, &role, claim)
+                    .await?;
+                Ok(None)
+            }
+            _ => {
+                self.handle_message(frame.request_id, &role, claim, &frame.ilp_packet)
+                    .await?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// The claim this frame carries, decoded (§4). `None` when the frame
+    /// carries no claim entry at all, and also when it carries one this
+    /// connector could not read -- an undecodable claim is *not
+    /// acknowledged* (§6.3) rather than rejected, so the payer's claim
+    /// stays pending and its retransmission is read the same way instead of
+    /// being recorded as a verdict that was never reached.
+    fn decode_claim(&self, raw: &[u8]) -> Option<WireClaim> {
+        match claim_json::parse(raw) {
+            Ok(claim) => Some(claim),
+            Err(error) => {
+                // No peer id to name: the claim *is* what would have named
+                // one, and it did not decode.
+                tracing::warn!(%error, "peer claim could not be decoded; not acknowledged");
+                None
+            }
+        }
+    }
+
+    /// §1.6's loud half. A claim naming a configured peer channel that
+    /// fails P2 or P3 is an *assertion*; the frame is a client frame and is
+    /// not refused for the assertion alone -- refusing would make the check
+    /// an oracle for which peerings this connector has configured -- but a
+    /// silent downgrade would present to an operator as "peering
+    /// configured, nothing peers, no error anywhere". The rate-limited
+    /// event is what stops that.
+    fn report_refusal(&self, refusal: Option<&PeerAuthRefusal>) {
+        let Some(refusal) = refusal else {
+            return;
+        };
+        let report = self
+            .state
+            .refusals
+            .lock()
+            .expect("peer auth refusal log poisoned")
+            .observe(refusal, now_ms());
+        if let Some(report) = report {
+            tracing::warn!(
+                event = report.event,
+                peer_id = %report.peer_id,
+                unmet = report.unmet.name(),
+                suppressed = report.suppressed,
+                "a peer channel's claim did not verify; the frame is a client frame"
+            );
+        }
+    }
+
+    async fn send(&self, frame: Vec<u8>) -> Result<(), SessionGone> {
+        reply(&self.replies, frame).await
     }
 
     /// FLUSH (§3.3, §3): a TRANSFER carrying the claim alone.
@@ -481,12 +486,11 @@ impl PeerSession {
         &mut self,
         request_id: u32,
         amount: Option<u64>,
-        protocol_data: &[ProtocolData],
+        role: &SessionRole,
+        claim: Option<WireClaim>,
     ) -> Result<(), SessionGone> {
-        let judged = self.judge_claim(protocol_data);
-        if let (Some(amount), Some(claim)) =
-            (amount, judged.as_ref().and_then(|j| j.claim.as_ref()))
-        {
+        let ack = self.judge_claim(role, claim.as_ref());
+        if let (Some(amount), Some(claim)) = (amount, claim.as_ref()) {
             if amount != claim.cumulative_amount {
                 // §10.2 item 13 pins the equality. The claim is the truth
                 // (ADR 0005) and is judged either way; a disagreeing
@@ -499,8 +503,7 @@ impl PeerSession {
                 );
             }
         }
-        let ack = judged.map_or(ClaimAckOutcome::NotSent, |judged| judged.ack);
-        let entries: Vec<ProtocolData> = self.claim_ack_entry(ack).into_iter().collect();
+        let entries: Vec<ProtocolData> = self.claim_ack_entry(role, ack).into_iter().collect();
         // §6.1: the ack rides the RESPONSE that already answers the
         // claim-bearing TRANSFER. RFC-0023 requires the responder answer
         // every request, which is exactly what bounds the ack structurally.
@@ -511,36 +514,47 @@ impl PeerSession {
     async fn handle_message(
         &mut self,
         request_id: u32,
-        protocol_data: &[ProtocolData],
+        role: &SessionRole,
+        claim: Option<WireClaim>,
         ilp_packet: &[u8],
     ) -> Result<(), SessionGone> {
-        // Peeked before `judge_claim` below may record this claim, so the
-        // price-coverage check further down judges the claim's own advance
-        // past the watermark it rode in on, not the one it just became
-        // (issue #880).
-        let prior_watermark = self.binding.role().peer_id().and_then(|peer_id| {
-            let raw = claim_json::from_protocol_data(protocol_data)?;
-            let claim = claim_json::parse(raw).ok()?;
-            self.state.accepted.watermark(peer_id, &claim.channel_id)
+        // Peeked before `judge_claim` below may advance this channel's
+        // watermark, so the price-coverage check further down judges the
+        // claim's own advance past the watermark it rode in on, not the one
+        // it just became (issue #880).
+        //
+        // It is read from the book that is about to judge the claim --
+        // `ClaimBook`'s own durable inbound watermark, keyed by channel as
+        // that book keys it -- and never from `AcceptedClaims`, which is
+        // in-memory and per-process. Reading the per-process record made
+        // coverage disagree with the judgement across a restart: the book
+        // replays its journal and the record does not, so the first priced
+        // peer PREPARE after a restart was credited with its claim's whole
+        // cumulative amount as new payment (issue #1104).
+        // The peer role gates the read (§1.5 does not read a client's
+        // claim at all) and is no part of it: a channel's watermark is a
+        // property of the channel, which is how `ClaimBook` keys it.
+        let prior_watermark = role.peer_id().and(claim.as_ref()).and_then(|claim| {
+            self.state
+                .connector
+                .peer_channel_watermark(&claim.channel_id)
         });
 
         // Claims are judged **inline, in arrival order** (§7.1) -- before
         // the packet is even decoded, and before anything is spawned.
-        let judged = self.judge_claim(protocol_data);
-        let ack = judged
-            .as_ref()
-            .map_or(ClaimAckOutcome::NotSent, |judged| judged.ack);
+        let ack = self.judge_claim(role, claim.as_ref());
 
         if ilp_packet.is_empty() {
-            let entries: Vec<ProtocolData> = self.claim_ack_entry(ack).into_iter().collect();
+            let entries: Vec<ProtocolData> = self.claim_ack_entry(role, ack).into_iter().collect();
             return self.send(encode_response(request_id, &entries, &[])).await;
         }
 
-        let Some(peer_id) = self.binding.role().peer_id().map(str::to_string) else {
+        let Some(peer_id) = role.peer_id().map(str::to_string) else {
             // A client-role packet reaches no peer handling at all: no
             // watermark, no ledger, no ack (§1.7, §1.9).
             return self
                 .send(self.reject_response(
+                    role,
                     request_id,
                     Reject {
                         code: RejectCode::f02_unreachable(),
@@ -570,127 +584,85 @@ impl PeerSession {
             }
         };
 
-        let minimum_delivery = match fields::minimum_delivery(self.binding.role(), protocol_data) {
-            Ok(minimum_delivery) => minimum_delivery,
-            Err(error) => {
-                // §5.1: never silently zero. The claim's verdict rides
-                // this REJECT anyway -- the two answers are independent
-                // (§6.2).
-                return self
-                    .send(self.reject_response(
-                        request_id,
-                        fields::malformed_minimum_delivery_reject(&error),
-                        ack,
-                    ))
-                    .await;
-            }
-        };
-
-        // Issue #880 (owner decision #868): a peer PREPARE to a route this
-        // connector terminates and prices carries a covering claim, or it
-        // is refused with the client edge's own x402 greeting. The decision
-        // is `price_gate`'s, shared with the HTTP carriage so §0.1's one
-        // pipeline cannot admit over one carriage what it refuses over the
-        // other; what is this carriage's is only the frame the refusal is
-        // shaped into.
+        // Issue #880 (owner decision #868) and ADR 0042: a peer PREPARE
+        // carries a covering claim -- the route's `price` where this
+        // connector terminates, the packet's own `amount` where it forwards
+        // -- or it is refused with the client edge's own x402 greeting. The
+        // decision is `price_gate`'s, shared with the HTTP carriage so
+        // §0.1's one pipeline cannot admit over one carriage what it
+        // refuses over the other; what is this carriage's is only the frame
+        // the refusal is shaped into.
         if let Some(refusal) = price_gate::payment_required(
             &self.state.connector,
             &peer_id,
-            &prepare.destination,
+            &prepare,
             ack,
-            judged.as_ref().and_then(|judged| judged.claim.as_ref()),
+            claim.as_ref(),
             prior_watermark,
             self.state.enforcement.mode(&peer_id),
         ) {
             return self
-                .send(self.payment_required_response(request_id, refusal, ack))
+                .send(self.payment_required_response(role, request_id, refusal, ack))
                 .await;
         }
 
         let permit = window_slot(&self.window).await;
         let state = Arc::clone(&self.state);
         let replies = self.replies.clone();
-        let role = self.binding.role().clone();
+        let role = role.clone();
         tokio::spawn(async move {
             let _slot = permit;
             // Everything past admission, overlapping up to the window
             // (§7.1): routing and the downstream round trip.
             // `handle_peer_prepare` is handed no claim -- this frame's was
             // judged inline above, in order.
-            let (response, _) = state
-                .connector
-                .handle_peer_prepare(prepare, minimum_delivery, None)
-                .await;
+            let (response, _) = state.connector.handle_peer_prepare(prepare, None).await;
             let frame = encode_packet_response(&role, request_id, response, ack);
             let _ = reply(&replies, frame).await;
         });
         Ok(())
     }
 
-    /// A claim's verdict, and the claim itself when it was decodable.
-    fn judge_claim(&self, protocol_data: &[ProtocolData]) -> Option<Judged> {
-        // §1.5: role is decided before a claim is decoded, before a
-        // watermark is consulted, before anything is routed. A client's
-        // claim is not judged here at all -- the peer namespace is not
-        // reachable from a client interaction (§1.8).
-        let peer_id = self.binding.role().peer_id()?;
-        let raw = claim_json::from_protocol_data(protocol_data)?;
-
-        let claim = match claim_json::parse(raw) {
-            Ok(claim) => claim,
-            Err(error) => {
-                // Not one of §6.1's four reasons -- those judge a claim
-                // this connector could read. An undecodable one is *not
-                // acknowledged* (§6.3): no entry rides the response, the
-                // payer's claim stays pending, and its retransmission will
-                // be read the same way rather than being recorded as a
-                // verdict that was never reached.
-                tracing::warn!(
-                    peer_id,
-                    %error,
-                    "peer claim could not be decoded; not acknowledged"
-                );
-                return Some(Judged {
-                    ack: ClaimAckOutcome::NotSent,
-                    claim: None,
-                });
-            }
+    /// A claim's verdict (§6.1), or [`ClaimAckOutcome::NotSent`] when
+    /// there was no readable claim to judge or the frame was a client's.
+    fn judge_claim(&self, role: &SessionRole, claim: Option<&WireClaim>) -> ClaimAckOutcome {
+        // §1.5: a client's claim is not judged here at all -- the peer
+        // namespace is not reachable from a client frame (§1.8). A frame
+        // whose claim did not verify *is* a client frame, so this is also
+        // what keeps a bad signature from touching a watermark.
+        let (Some(peer_id), Some(claim)) = (role.peer_id(), claim) else {
+            return ClaimAckOutcome::NotSent;
         };
 
         // §6.3's idempotent re-ack, checked **before** the claim reaches
         // the book: a byte-identical retransmission at the current
         // watermark is `accepted`, and nothing is advanced or recorded.
-        if self.state.accepted.is_at_watermark(peer_id, &claim) {
-            return Some(Judged {
-                ack: ClaimAckOutcome::Accepted,
-                claim: Some(claim),
-            });
+        if self.state.accepted.is_at_watermark(peer_id, claim) {
+            return ClaimAckOutcome::Accepted;
         }
 
         let ack = self.state.connector.handle_peer_claim(claim.clone());
         if ack == ClaimAckOutcome::Accepted {
-            self.state.accepted.record(peer_id, &claim);
+            self.state.accepted.record(peer_id, claim);
         }
-        Some(Judged {
-            ack,
-            claim: Some(claim),
-        })
+        ack
     }
 
     /// §1.7: a connector MUST NOT emit a `claim-ack` on a client
     /// interaction, and §6.2 forbids one on a response answering a frame
     /// that carried no claim. Both are one call.
-    fn claim_ack_entry(&self, ack: ClaimAckOutcome) -> Option<ProtocolData> {
-        claim_ack_to_emit(self.binding.role(), ack::protocol_data(ack))
+    fn claim_ack_entry(&self, role: &SessionRole, ack: ClaimAckOutcome) -> Option<ProtocolData> {
+        claim_ack_to_emit(role, ack::protocol_data(ack))
     }
 
-    fn reject_response(&self, request_id: u32, reject: Reject, ack: ClaimAckOutcome) -> Vec<u8> {
-        encode_packet_response(
-            self.binding.role(),
-            request_id,
-            PacketResponse::Reject(reject),
-            ack,
-        )
+    fn reject_response(
+        &self,
+        role: &SessionRole,
+        request_id: u32,
+        reject: Reject,
+        ack: ClaimAckOutcome,
+    ) -> Vec<u8> {
+        encode_packet_response(role, request_id, PacketResponse::Reject(reject), ack)
     }
 
     /// [`price_gate::payment_required`]'s refusal, BTP-shaped: `F06` plus
@@ -701,6 +673,7 @@ impl PeerSession {
     /// and the claim's verdict are independent (§6.2).
     fn payment_required_response(
         &self,
+        role: &SessionRole,
         request_id: u32,
         refusal: PaymentRequired,
         ack: ClaimAckOutcome,
@@ -709,14 +682,9 @@ impl PeerSession {
             fields::accumulated_cost_protocol_data(refusal.reject.accumulated_cost),
             fields::payment_required_protocol_data(refusal.terms),
         ];
-        entries.extend(self.claim_ack_entry(ack));
+        entries.extend(self.claim_ack_entry(role, ack));
         encode_response(request_id, &entries, &refusal.reject.encode())
     }
-}
-
-struct Judged {
-    ack: ClaimAckOutcome,
-    claim: Option<WireClaim>,
 }
 
 /// The RESPONSE answering a PREPARE: **two independent answers on one

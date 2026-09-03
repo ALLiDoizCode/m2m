@@ -23,9 +23,8 @@
 //!
 //! ## LOCAL / DEV ONLY, and inert unless driven
 //!
-//! Every test returns immediately unless `STORE_PROBE_EDGE` is set -- the same
-//! gate `local_stack_rehearsal.rs` uses, so an ordinary `cargo test` run never
-//! needs a live fleet. The PAID test needs a funded channel as well and stays
+//! Every test returns immediately unless `STORE_PROBE_EDGE` is set, so an
+//! ordinary `cargo test` run never needs a live fleet. The PAID test needs a funded channel as well and stays
 //! inert without one; running it SPENDS REAL DEVNET VALUE (one packet, at the
 //! quoted price) and ADVANCES THE CHANNEL WATERMARK, so `STORE_PROBE_NONCE` /
 //! `STORE_PROBE_CUMULATIVE` must be bumped between runs.
@@ -278,7 +277,7 @@ async fn fetch_price(base: &str, destination: &str) -> u64 {
 /// made-up event is refused -- which is what makes "the store accepted it" a
 /// statement about a real event. BIP-340 Schnorr over the event's own SHA-256
 /// id: neither `libsecp256k1` 0.6 nor `connector-signer` signs that way, hence
-/// `k256`'s `schnorr` here, as in `local_stack_rehearsal.rs`.
+/// `k256`'s `schnorr` here.
 fn signed_blob_storage_job(
     blob: &[u8],
     content_type: &str,

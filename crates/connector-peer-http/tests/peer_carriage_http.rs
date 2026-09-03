@@ -20,20 +20,22 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use connector_btp::{
     ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, CLAIM_HEADER, FLUSH_REQUESTED_HEADER,
-    MINIMUM_DELIVERY_HEADER, PAYMENT_REQUIRED_HEADER,
+    PAYMENT_REQUIRED_HEADER,
 };
-use connector_config::{PeerCredential, StaticRoute};
+use connector_config::StaticRoute;
 use connector_domain::x402::parse_greeting;
 use connector_domain::{PacketResponse, Prepare};
-use connector_peer_auth::{encode_base64, PeerAuthPolicy, PresentedCredential, PEER_AUTH_HEADER};
+use connector_peer_auth::PeerAuthPolicy;
 use connector_peer_btp::{AcceptedClaims, ClaimEnforcementPolicy};
 use connector_peer_http::accept::{FlushHints, PeerHttpPolicy, PeerHttpState};
 use connector_peer_http::dial::{HttpDialError, PeerHttpClient, PeerRelation};
 use connector_peer_http::headers::{Headers, PeerRequest, PeerResponse};
 use connector_peer_http::{HttpPeerTransport, NAT_NOTE};
 use connector_runtime::{
-    ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, Clock, Connector,
-    FakeAppClient, InProcessPeerTransport, PeerForward, PeerTransport, TestClock, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, ClaimStateDomain,
+    ClaimStateSource, ClaimWatermark, Clock, Connector, EvmDomain, FakeAppClient, InMemoryJournal,
+    InProcessPeerTransport, Journal, OutboundClientError, OutboundClientLedger, PeerForward,
+    PeerRoute, PeerTransport, TestClock, WireClaim,
 };
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signer,
@@ -45,10 +47,58 @@ use url::Url;
 const CHAIN_ID: u64 = 84_532;
 const TOKEN_NETWORK: [u8; 20] = [0x33; 20];
 const PEER_ID: &str = "peer-b";
-const SECRET: &str = "a-shared-secret";
 
 fn channel_id() -> String {
     format!("0x{:064x}", 7)
+}
+
+/// The channel a FORWARDING fixture pays its own next hop from -- a
+/// different channel from [`channel_id`], which is the one the arriving
+/// peering's claims are judged against.
+fn pay_channel_id() -> String {
+    format!("0x{:064x}", 8)
+}
+
+/// The next hop reporting where this node's claims on that channel stand.
+/// A fake upholding `ClaimStateSource`'s contract, not a stub with
+/// expectations (ADR 0007).
+struct ReportsAWatermark;
+
+#[async_trait::async_trait]
+impl ClaimStateSource for ReportsAWatermark {
+    async fn watermark(
+        &self,
+        _channel: &[u8; 32],
+        _domain: &ClaimStateDomain,
+    ) -> Result<ClaimWatermark, OutboundClientError> {
+        Ok(ClaimWatermark {
+            nonce: 0,
+            cumulative: 0,
+            available: Some(u128::MAX),
+        })
+    }
+}
+
+/// ADR 0042's send half, which issue #1145 made unavoidable: a connector
+/// covers every PREPARE it sends, and one it cannot cover it refuses `T00`
+/// before the transport is reached. Any fixture here that FORWARDS needs
+/// this -- `Config::load` refuses the file that would produce one without it
+/// (`ConfigError::PayChannelUnbound`), so a fixture lacking it is testing a
+/// node no operator could deploy.
+fn covering(connector: Connector, peer_id: &str) -> Connector {
+    connector
+        .with_signer(Arc::new(LocalSigner::generate("forwarding-settlement")))
+        .with_outbound_client_ledger(Arc::new(OutboundClientLedger::in_memory()))
+        .with_outbound_client_hop(
+            peer_id,
+            pay_channel_id(),
+            EvmDomain {
+                chain_id: domain().chain_id,
+                token_network: domain().token_network_address,
+            },
+            Arc::new(ReportsAWatermark),
+        )
+        .expect("a bytes32 channel id")
 }
 
 fn clock() -> Arc<TestClock> {
@@ -81,6 +131,40 @@ fn sign_claim(signer: &dyn Signer, nonce: u64, cumulative_amount: u64) -> WireCl
     };
     WireClaim {
         channel_id: channel_id(),
+        nonce,
+        cumulative_amount,
+        signature: ClaimSignature::Evm(
+            signer
+                .sign(&evm_balance_proof_digest(&proof))
+                .expect("sign"),
+        ),
+    }
+}
+
+/// The same claim on an arbitrary channel: `byte` is the on-chain id's last
+/// byte and `channel` its `0x`-padded spelling, so a fixture can name a
+/// channel this connector holds no record of without reaching for a second
+/// signer.
+fn sign_claim_on(
+    signer: &dyn Signer,
+    channel: &str,
+    byte: u8,
+    nonce: u64,
+    cumulative_amount: u64,
+) -> WireClaim {
+    let mut on_chain_id = [0u8; 32];
+    on_chain_id[31] = byte;
+    let proof = EvmBalanceProof {
+        channel_id: on_chain_id,
+        nonce,
+        transferred_amount: u128::from(cumulative_amount),
+        locked_amount: 0,
+        locks_root: [0u8; 32],
+        chain_id: CHAIN_ID,
+        token_network_address: TOKEN_NETWORK,
+    };
+    WireClaim {
+        channel_id: channel.to_string(),
         nonce,
         cumulative_amount,
         signature: ClaimSignature::Evm(
@@ -132,13 +216,56 @@ fn payee_with_route(payer: &dyn Signer, route: StaticRoute) -> Arc<Connector> {
     )
 }
 
-/// A policy in which `PEER_ID` is configured, has a secret, and is channel
-/// bound -- P1 and P2 both satisfiable.
+/// The one priced, terminated route issue #880's gate and issue #1104's
+/// restart tests both need.
+fn priced_route() -> StaticRoute {
+    StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap()
+}
+
+/// This payee's identity key, deterministic so that a node built before a
+/// restart and the one built after it are the same node to a sender that
+/// sealed to it (issue #1104).
+fn payee_identity() -> Arc<dyn Signer> {
+    Arc::new(LocalSigner::from_secret_bytes("payee-identity", [0x5c; 32]).expect("identity signer"))
+}
+
+/// As [`payee_with_route`], but journaling to `journal` and delivering to
+/// `app_client`: the fixture a **restart** needs (issue #1104). The journal
+/// is the only thing a node keeps across one (ADR 0005), so a second
+/// connector built over the same journal -- new `ClaimBook`, new
+/// `AcceptedClaims`, new everything else -- is exactly what a restarted
+/// payee is, with its inbound watermarks rebuilt by replay.
+fn payee_journaling_to(
+    payer: &dyn Signer,
+    route: StaticRoute,
+    app_client: Arc<FakeAppClient>,
+    journal: Arc<dyn Journal>,
+) -> Arc<Connector> {
+    let counterparty = derive_evm_address(&payer.public_key().unwrap());
+    Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id")
+        .with_identity_signer(payee_identity())
+        .with_journal(journal)
+        .expect("the journal replays clean"),
+    )
+}
+
+/// A policy in which `PEER_ID` is configured and its channel is bound --
+/// P2 satisfiable, so P3 is the only thing left to decide role.
 fn bound_policy() -> Arc<PeerAuthPolicy> {
-    let credential = PeerCredential::new(SECRET);
+    let channel = channel_id();
     Arc::new(PeerAuthPolicy::new(
-        vec![(PEER_ID, &credential)],
         vec![PEER_ID],
+        vec![(channel.as_str(), PEER_ID)],
     ))
 }
 
@@ -159,10 +286,11 @@ fn accepting_with(
     )
 }
 
-/// [`accepting_with`], with an explicit [`ClaimEnforcementPolicy`] (issue
-/// #883, child B6) rather than the default (empty, so every peer reads
-/// `ClaimEnforcement::Enforce` -- the same hard-refuse behaviour issue #880
-/// shipped, unaffected by the migration knob existing).
+/// [`accepting_with`], with an explicit [`ClaimEnforcementPolicy`] rather
+/// than the default (empty, so every peer reads
+/// `ForwardedClaimEnforcement::Observe`). Only ADR 0042's forwarded rule
+/// answers to this policy: the terminated rule's own knob was deleted with
+/// its escape hatch (issue #1077) and refuses unconditionally.
 fn accepting_with_enforcement(
     connector: Arc<Connector>,
     policy: Arc<PeerAuthPolicy>,
@@ -177,6 +305,119 @@ fn accepting_with_enforcement(
         hints,
         PeerHttpPolicy::default(),
     ))
+}
+
+/// The next hop a forwarded arrival is carried to (ADR 0042's item 3), and
+/// the destination that resolves to it.
+const NEXT_HOP_ID: &str = "next-hop";
+const FORWARDED_DESTINATION: &str = "g.example.onward";
+
+/// This peering's flat fee, and the client-edge `price` its forwarded route
+/// carries. Both are deliberately non-zero and deliberately *not* what a
+/// forwarded arrival must cover -- ADR 0042 requires the packet's own
+/// `amount`, so a claim advancing either of these figures is short.
+const FORWARD_FEE: u64 = 3;
+const FORWARD_ROUTE_PRICE: u64 = 5;
+
+/// The amount every forwarded-arrival test sends, matching [`prepare`].
+const ARRIVING_AMOUNT: u64 = 100;
+
+/// As [`payee`], but **forwarding**: one `peer_id` route over which
+/// [`FORWARDED_DESTINATION`] reaches a real second connector that terminates
+/// it. The fixture ADR 0042's item 3 needs, since neither `payee` (no
+/// routes) nor `payee_with_route` (a termination) ever reaches a
+/// `ClientRouteKind::Forwarded` arrival. The BTP twin of the same fixture.
+///
+/// Returns the next hop's own app client and identity signer too, so a test
+/// can seal a packet the far end can actually fulfil and then prove the
+/// packet really was carried rather than merely not refused.
+fn forwarding_payee(payer: &dyn Signer) -> (Arc<Connector>, Arc<FakeAppClient>, Arc<dyn Signer>) {
+    let next_hop_route = StaticRoute::new(FORWARDED_DESTINATION, "http://localhost:4100").unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    app_client.respond(
+        next_hop_route.handler_url(),
+        connector_runtime::AppOutcome::Answered {
+            response: connector_domain::EnvelopeResponse {
+                status: 200,
+                headers: vec![],
+                body: b"delivered by the next hop".to_vec(),
+            },
+        },
+    );
+    let identity: Arc<dyn Signer> = Arc::new(LocalSigner::generate("next-hop-identity"));
+    let next_hop = Arc::new(
+        Connector::new(
+            vec![next_hop_route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_identity_signer(Arc::clone(&identity)),
+    );
+    let mut onward = InProcessPeerTransport::new();
+    onward.add_peer(NEXT_HOP_ID, next_hop);
+
+    let counterparty = derive_evm_address(&payer.public_key().unwrap());
+    let connector = Arc::new(covering(
+        Connector::new(
+            vec![],
+            vec![PeerRoute::new_priced(
+                FORWARDED_DESTINATION,
+                NEXT_HOP_ID,
+                FORWARD_ROUTE_PRICE,
+            )],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(onward),
+            clock(),
+        )
+        .with_peer_fees([(NEXT_HOP_ID.to_string(), FORWARD_FEE)])
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id"),
+        NEXT_HOP_ID,
+    ));
+    (connector, app_client, identity)
+}
+
+/// A PREPARE sealed to `identity`'s public key (ADR 0018/0019) so the hop
+/// that finally terminates it can fulfil, plus the shared secret needed to
+/// open the answer. Sealing is orthogonal to every gate here and is what
+/// makes "the packet was carried" provable rather than inferred.
+fn sealed_prepare_to(identity: &dyn Signer, destination: &str, amount: u64) -> (Prepare, [u8; 32]) {
+    let envelope = connector_domain::EnvelopeRequest {
+        method: "POST".to_string(),
+        target: "/".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+    };
+    let identity_public = identity.public_key().expect("identity public key");
+    let (data, shared_secret) =
+        connector_signer::giftwrap::seal_request(&envelope.encode(), &identity_public)
+            .expect("seal");
+    let condition = connector_domain::derive_condition(
+        &connector_signer::giftwrap::derive_fulfillment(&shared_secret),
+    );
+    (
+        Prepare {
+            amount,
+            expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+            execution_condition: condition,
+            destination: destination.to_string(),
+            data,
+        },
+        shared_secret,
+    )
+}
+
+/// A policy in which `PEER_ID` enforces ADR 0042's forwarded rule. There is
+/// no terminated setting to leave alone: ADR 0029's rule always enforces
+/// (issue #1077 deleted `claim_enforcement`).
+fn forwarded_enforcing() -> Arc<ClaimEnforcementPolicy> {
+    Arc::new(ClaimEnforcementPolicy::of(vec![(
+        PEER_ID,
+        connector_config::ForwardedClaimEnforcement::Enforce,
+    )]))
 }
 
 fn prepare(destination: &str) -> Prepare {
@@ -316,7 +557,6 @@ fn relation() -> PeerRelation {
     PeerRelation::new(
         PEER_ID,
         Url::parse("https://peer.example:443/ilp").unwrap(),
-        PresentedCredential::new(PEER_ID, SECRET),
         domains,
         solana_program_ids,
         Duration::from_millis(30_000),
@@ -325,7 +565,7 @@ fn relation() -> PeerRelation {
 }
 
 fn transport(client: Arc<dyn PeerHttpClient>, payer: &dyn Signer) -> HttpPeerTransport {
-    let mut transport = HttpPeerTransport::new(
+    let transport = HttpPeerTransport::new(
         client,
         derive_evm_address(&payer.public_key().unwrap()),
         clock() as Arc<dyn Clock>,
@@ -336,18 +576,8 @@ fn transport(client: Arc<dyn PeerHttpClient>, payer: &dyn Signer) -> HttpPeerTra
 
 /// One request, as a peer would send it by hand -- for the accept-side tests
 /// that have no dialing transport in front of them.
-fn request(
-    credential: Option<(&str, &str)>,
-    claim_json: Option<&str>,
-    body: Vec<u8>,
-) -> PeerRequest {
+fn request(claim_json: Option<&str>, body: Vec<u8>) -> PeerRequest {
     let mut headers = Headers::new();
-    if let Some((peer_id, secret)) = credential {
-        headers.push(
-            PEER_AUTH_HEADER,
-            encode_base64(&PresentedCredential::new(peer_id, secret)),
-        );
-    }
     if let Some(json) = claim_json {
         headers.push(
             CLAIM_HEADER,
@@ -400,7 +630,7 @@ async fn a_claim_riding_a_prepare_is_judged_independently_of_the_packet() {
         reached_peer: reached,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, Some(claim))
+        .forward(PEER_ID, prepare("g.nowhere"), Some(claim))
         .await;
 
     match response {
@@ -412,8 +642,7 @@ async fn a_claim_riding_a_prepare_is_judged_independently_of_the_packet() {
 }
 
 /// §3's table, as bytes: the credential and the claim are `base64(JSON)`
-/// headers, the minimum-delivery declaration is decimal ASCII, and the body
-/// is the OER PREPARE unchanged (§8.1).
+/// headers, and the body is the OER PREPARE unchanged (§8.1).
 #[tokio::test]
 async fn the_request_a_dialed_peering_puts_on_the_wire_is_the_one_section_3_names() {
     let payer_signer = LocalSigner::generate("payer");
@@ -427,14 +656,18 @@ async fn the_request_a_dialed_peering_puts_on_the_wire_is_the_one_section_3_name
     let prepare = prepare("g.nowhere");
 
     let _ = transport
-        .forward(PEER_ID, prepare.clone(), 1_250, Some(claim.clone()))
+        .forward(PEER_ID, prepare.clone(), Some(claim.clone()))
         .await;
 
     let sent = client.last();
-    // §1.4: the credential, on **every** request, since HTTP has no session.
-    assert_eq!(
-        sent.headers.get(PEER_AUTH_HEADER),
-        Some(encode_base64(&PresentedCredential::new(PEER_ID, SECRET)).as_str())
+    // §1.4: nothing authenticates the peering but the claim. A dialer sends
+    // no credential, because there is none to send (ADR 0060) -- and the
+    // header it used to ride in must not reappear under any spelling.
+    assert!(
+        sent.headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("toon-peer-auth")),
+        "a dialed peering put a peer credential on the wire"
     );
     // §4: `base64(JSON)` over exactly the JSON the BTP entry carries raw.
     let claim_json = base64_decode(sent.headers.get(CLAIM_HEADER).expect("a claim rode"));
@@ -442,19 +675,18 @@ async fn the_request_a_dialed_peering_puts_on_the_wire_is_the_one_section_3_name
         connector_peer_btp::claim_json::parse(&claim_json).expect("the client edge's validator"),
         claim
     );
-    // §5.1: decimal uint64 ASCII, one value, no list form.
-    assert_eq!(sent.headers.get(MINIMUM_DELIVERY_HEADER), Some("1250"));
     // §8.1: `data` rides byte-for-byte unchanged, in the same OER encoding
     // every other carriage puts on a wire.
     assert_eq!(sent.body, prepare.encode());
-    // §3: a peer connector MUST NOT invent additional headers.
-    assert_eq!(sent.headers.len(), 3, "got {:?}", sent.headers);
+    // §3: a peer connector MUST NOT invent additional headers. One, now
+    // that the credential is gone (ADR 0060): the claim.
+    assert_eq!(sent.headers.len(), 1, "got {:?}", sent.headers);
 }
 
-/// §5.1: a zero floor rides as an **absent** header, because absent means
-/// zero on receipt.
+/// §10.2 item 6: a claimless PREPARE is legal, and carries no claim header
+/// rather than an empty one.
 #[tokio::test]
-async fn a_zero_minimum_delivery_rides_as_an_absent_header() {
+async fn a_claimless_prepare_carries_no_claim_header() {
     let payer_signer = LocalSigner::generate("payer");
     let peer = accepting(payee(&payer_signer), bound_policy());
     let client = Loopback::new(peer);
@@ -463,14 +695,9 @@ async fn a_zero_minimum_delivery_rides_as_an_absent_header() {
         &payer_signer,
     );
 
-    let _ = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, None)
-        .await;
+    let _ = transport.forward(PEER_ID, prepare("g.nowhere"), None).await;
 
     let sent = client.last();
-    assert_eq!(sent.headers.get(MINIMUM_DELIVERY_HEADER), None);
-    // §10.2 item 6: a claimless PREPARE is legal, and carries no claim
-    // header rather than an empty one.
     assert_eq!(sent.headers.get(CLAIM_HEADER), None);
 }
 
@@ -543,6 +770,105 @@ async fn a_flushed_solana_claim_carries_its_configured_program_id_on_the_wire() 
     assert_eq!(parsed, claim);
 }
 
+/// The same wire assertion, but with the relation built by
+/// [`HttpPeerTransport::add_peers_from_config`] from a **loaded config**
+/// rather than by hand -- because the value under test is precisely the one
+/// this carriage must not choose for itself.
+///
+/// Since issue #1128 a Solana `[[peer_channels]]` row MUST NOT restate a
+/// `program_id`; the row resolves it from `[settlement.solana] program_id`,
+/// the only program this node can redeem a claim through. This closes the
+/// hop between that table and the `programId` a peer claim carries, and it
+/// is half of what `peer-carriage-spec.md` §4.1 relies on when it says a
+/// peer-edge check of the declared field would have nothing to find: the
+/// same configured value renders the label here and keys the
+/// `SolanaChannel` an inbound claim is verified against. The other half --
+/// that a claim declaring one program and signed under another is accepted
+/// on its signature, silently -- is
+/// `connector-peer-btp`'s `a_peer_claims_declared_program_is_not_consulted`.
+#[tokio::test]
+async fn a_solana_claim_flushed_from_a_loaded_config_declares_the_settlement_tables_program() {
+    use std::io::Write;
+
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+    key_file.write_all(b"not a real key").expect("write key");
+    let toml = format!(
+        r#"
+client_edge_addr = "127.0.0.1:3000"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[[peers]]
+id = "{PEER_ID}"
+endpoint = "https://peer.example:443/ilp"
+
+[[peer_channels]]
+peer_id = "{PEER_ID}"
+channel_account = "{channel_account}"
+counterparty_key = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "{SOLANA_PROGRAM_ID}"
+token_address = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_file}"
+"#,
+        state_dir = state_dir.path().display(),
+        key_file = key_file.path().display(),
+        channel_account = solana_channel_account(),
+    );
+    let mut config_file = tempfile::Builder::new()
+        .suffix(".toml")
+        .tempfile()
+        .expect("temp config file");
+    config_file
+        .write_all(toml.as_bytes())
+        .expect("write config");
+    let config = connector_config::Config::load(config_file.path()).expect("load");
+
+    let payer_signer = LocalSigner::generate("payer");
+    let peer = accepting(payee(&payer_signer), bound_policy());
+    let client = Loopback::new(peer);
+    let mut transport = HttpPeerTransport::new(
+        Arc::clone(&client) as Arc<dyn PeerHttpClient>,
+        derive_evm_address(&payer_signer.public_key().unwrap()),
+        clock() as Arc<dyn Clock>,
+    );
+    transport.add_peers_from_config(config.peers(), config.peer_channels());
+    transport.set_solana_signer_public_key([0x77; 32]);
+
+    let _ = transport
+        .flush(
+            PEER_ID,
+            WireClaim {
+                channel_id: solana_channel_account(),
+                nonce: 1,
+                cumulative_amount: 500,
+                signature: ClaimSignature::Solana([0x5a; 64]),
+            },
+        )
+        .await;
+
+    let carried = base64_decode(
+        client
+            .last()
+            .headers
+            .get(CLAIM_HEADER)
+            .expect("the claim rode"),
+    );
+    let claim_json: serde_json::Value = serde_json::from_slice(&carried).expect("raw UTF-8 JSON");
+    assert_eq!(
+        claim_json["programId"], SOLANA_PROGRAM_ID,
+        "the declared program is `[settlement.solana] program_id` and nothing else (#1128)"
+    );
+}
+
 // ─── §6.3: retransmission, and the idempotent re-ack ───
 
 /// §6.3, the rule standing between a lost ack and a permanently wedged
@@ -608,7 +934,6 @@ async fn the_same_nonce_with_different_bytes_is_refused_nonce_not_advancing() {
     // Same nonce, a different cumulative: a different claim.
     let response = peer
         .handle(request(
-            Some((PEER_ID, SECRET)),
             Some(&claim_as_json(
                 &sign_claim(&payer_signer, 1, 900),
                 &payer_signer,
@@ -710,7 +1035,6 @@ async fn a_non_200_answer_is_no_ilp_answer_at_all() {
         .forward(
             PEER_ID,
             prepare("g.nowhere"),
-            0,
             Some(sign_claim(&payer_signer, 1, 500)),
         )
         .await;
@@ -741,9 +1065,7 @@ async fn a_peer_that_cannot_be_reached_rejects_t01_and_was_never_reached() {
         ack,
         reached_peer: reached,
         ..
-    } = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, None)
-        .await;
+    } = transport.forward(PEER_ID, prepare("g.nowhere"), None).await;
 
     match response {
         PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T01"),
@@ -769,7 +1091,7 @@ async fn a_peer_this_connector_cannot_originate_to_says_why_in_its_t01() {
         reached_peer: reached,
         ..
     } = transport
-        .forward("accept-only", prepare("g.nowhere"), 0, None)
+        .forward("accept-only", prepare("g.nowhere"), None)
         .await;
 
     match response {
@@ -819,43 +1141,61 @@ async fn an_accept_only_peering_cannot_flush() {
 /// nonce 1 being accepted, which it could not be if any of these had
 /// advanced anything).
 #[tokio::test]
-async fn the_named_regression_no_request_becomes_a_peer_without_p1_and_p2() {
+async fn the_named_regression_no_request_becomes_a_peer_without_p2_and_p3() {
     let payer_signer = LocalSigner::generate("payer");
-    let credential = PeerCredential::new(SECRET);
-    // `unbound` is configured and has a secret, but no `[[peer_channels]]`
-    // row: P2 alone failing.
-    let unbound = PeerCredential::new(SECRET);
+    let stranger = LocalSigner::generate("stranger");
+    // A channel this policy binds to `PEER_ID` but the connector holds no
+    // verification key for: P2 failing, which is config and chain
+    // disagreeing rather than a caller's doing.
+    let unrecorded = format!("0x{:064x}", 11);
+    // A channel bound to a peer id no `[[peers]]` entry configures. The
+    // policy drops the row, so its channel binds nothing -- the runtime
+    // analogue of `PeerChannelOrphaned`.
+    let orphaned = format!("0x{:064x}", 12);
+    let bound = channel_id();
     let policy = Arc::new(PeerAuthPolicy::new(
-        vec![(PEER_ID, &credential), ("unbound", &unbound)],
         vec![PEER_ID],
+        vec![
+            (bound.as_str(), PEER_ID),
+            (unrecorded.as_str(), PEER_ID),
+            (orphaned.as_str(), "stranger"),
+        ],
     ));
     let peer = accepting(payee(&payer_signer), policy);
-    let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
 
-    let asserted: Vec<Option<(&str, &str)>> = vec![
-        // 1. no credential at all
+    let asserted: Vec<Option<String>> = vec![
+        // 1. no claim at all
         None,
-        // 2. an empty secret
-        Some((PEER_ID, "")),
-        // 3. a correct peer id with a wrong secret
-        Some((PEER_ID, "not-the-secret")),
-        // 4. a correct credential for a peer with no channel binding
-        Some(("unbound", SECRET)),
-        // 5. a valid credential naming a peer id that is not configured
-        Some(("stranger", SECRET)),
+        // 2. a claim on a channel no `[[peer_channels]]` row configures
+        Some(claim_as_json(
+            &sign_claim_on(&payer_signer, &format!("0x{:064x}", 13), 13, 1, 500),
+            &payer_signer,
+        )),
+        // 3. a claim on a configured channel whose signature does not
+        //    recover to the counterparty key that row configures (P3)
+        Some(claim_as_json(&sign_claim(&stranger, 1, 500), &stranger)),
+        // 4. a claim on a bound channel this node holds no record of (P2)
+        Some(claim_as_json(
+            &sign_claim_on(&payer_signer, &unrecorded, 11, 1, 500),
+            &payer_signer,
+        )),
+        // 5. a claim on a channel whose row names an unconfigured peer id
+        Some(claim_as_json(
+            &sign_claim_on(&payer_signer, &orphaned, 12, 1, 500),
+            &payer_signer,
+        )),
     ];
 
-    for (index, credential) in asserted.into_iter().enumerate() {
+    for (index, claim_json) in asserted.into_iter().enumerate() {
         let response = peer
             .handle(request(
-                credential,
-                Some(&json),
+                claim_json.as_deref(),
                 prepare("g.nowhere").encode(),
             ))
             .await;
 
         // §1.6: not refused for the assertion alone -- refusing would make
-        // the credential check an oracle for which peer ids are configured.
+        // the check an oracle for which channels are configured.
         assert_eq!(response.status, 200, "case {index}");
         assert!(
             ack_on(&response).is_none(),
@@ -869,9 +1209,8 @@ async fn the_named_regression_no_request_becomes_a_peer_without_p1_and_p2() {
 
     // Nothing above moved a peer watermark: a genuine peer's claim at nonce
     // 1 is still fresh.
-    let response = peer
-        .handle(request(Some((PEER_ID, SECRET)), Some(&json), Vec::new()))
-        .await;
+    let genuine = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
+    let response = peer.handle(request(Some(&genuine), Vec::new())).await;
 
     assert_eq!(
         ack_on(&response),
@@ -880,22 +1219,27 @@ async fn the_named_regression_no_request_becomes_a_peer_without_p1_and_p2() {
     );
 }
 
-/// §1.5's header-smuggling defence: **more than one `Toon-Peer-Auth` on one
-/// request is refused, not resolved** -- `400`, with no ILP body, and never
-/// the first, the last or a concatenation. Its absence is how "which
-/// credential did we check?" becomes unanswerable.
+/// §1.5's header-smuggling defence, now over the material that actually
+/// decides role: **more than one claim header on one request is refused, not
+/// resolved** -- `400`, with no ILP body, and never the first, the last or a
+/// concatenation. Its absence is how "which claim did we verify?" becomes
+/// unanswerable. It guarded the `Toon-Peer-Auth` header until ADR 0060
+/// deleted it; the defect it names is a property of duplicated
+/// authentication material rather than of the credential in particular.
 #[tokio::test]
-async fn two_credentials_on_one_request_are_refused_rather_than_resolved() {
+async fn two_claims_on_one_request_are_refused_rather_than_resolved() {
     let payer_signer = LocalSigner::generate("payer");
     let peer = accepting(payee(&payer_signer), bound_policy());
+    let first = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
+    let second = claim_as_json(&sign_claim(&payer_signer, 2, 600), &payer_signer);
     let mut headers = Headers::new();
     headers.push(
-        PEER_AUTH_HEADER,
-        encode_base64(&PresentedCredential::new(PEER_ID, SECRET)),
+        CLAIM_HEADER,
+        connector_peer_http::headers::claim_header_value(&first),
     );
     headers.push(
-        PEER_AUTH_HEADER,
-        encode_base64(&PresentedCredential::new(PEER_ID, "another")),
+        CLAIM_HEADER,
+        connector_peer_http::headers::claim_header_value(&second),
     );
 
     let response = peer
@@ -908,20 +1252,25 @@ async fn two_credentials_on_one_request_are_refused_rather_than_resolved() {
     assert_eq!(response.status, 400);
     assert!(response.body.is_empty(), "a 400 carries no ILP body (§1.5)");
     assert!(ack_on(&response).is_none());
+
+    // Neither claim was adopted: nonce 1 is still fresh, so nothing was
+    // resolved behind the refusal.
+    let fresh = peer.handle(request(Some(&first), Vec::new())).await;
+    assert_eq!(ack_on(&fresh), Some(ClaimAckOutcome::Accepted));
 }
 
-/// §1.4: because HTTP has no session, the credential is presented on **every**
-/// request. One request proving a peering says nothing about the next.
+/// §1.4: because HTTP has no session, a request is judged on its own claim.
+/// One request proving a peering says nothing about the next -- a request
+/// carrying no claim is a client request, whatever the previous request from
+/// the same connection carried.
 #[tokio::test]
-async fn a_request_without_the_credential_is_a_client_however_the_last_one_was_judged() {
+async fn a_request_without_a_claim_is_a_client_however_the_last_one_was_judged() {
     let payer_signer = LocalSigner::generate("payer");
     let peer = accepting(payee(&payer_signer), bound_policy());
     let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
 
-    let proven = peer
-        .handle(request(Some((PEER_ID, SECRET)), Some(&json), Vec::new()))
-        .await;
-    let next = peer.handle(request(None, Some(&json), Vec::new())).await;
+    let proven = peer.handle(request(Some(&json), Vec::new())).await;
+    let next = peer.handle(request(None, Vec::new())).await;
 
     assert_eq!(ack_on(&proven), Some(ClaimAckOutcome::Accepted));
     assert!(
@@ -930,59 +1279,39 @@ async fn a_request_without_the_credential_is_a_client_however_the_last_one_was_j
     );
 }
 
-/// §1.7/§5.1: a client's `Toon-Minimum-Delivery` is **ignored** -- not
-/// rejected and not applied -- so a client SDK setting an unrecognised header
-/// is not broken by a peer feature, and no error discloses the peer surface.
+/// §5.2: a REJECT this carriage sends always carries the running cost,
+/// **even at zero**, so "absent" never has to carry meaning in the
+/// direction that matters. Kept when §5.1's malformed-floor case went with
+/// minimum delivery (ADR 0057, issue #1143), which is where this assertion
+/// used to ride.
 #[tokio::test]
-async fn a_client_roles_minimum_delivery_header_is_ignored_not_refused() {
-    let payer_signer = LocalSigner::generate("payer");
-    let peer = accepting(payee(&payer_signer), bound_policy());
-    let mut request = request(None, None, prepare("g.nowhere").encode());
-    request.headers.push(MINIMUM_DELIVERY_HEADER, "twelve");
-
-    let response = peer.handle(request).await;
-
-    assert_eq!(response.status, 200);
-    // The client's packet reaches no peer handling: `F02`, not the `F01` a
-    // peer's malformed declaration would provoke.
-    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
-    assert_eq!(reject.code.as_str(), "F02");
-}
-
-/// §5.1: on a **peer** request the same header is never silently zero -- a
-/// malformed floor is `F01`, because zero is the weakest possible floor and
-/// substituting it converts a framing bug into an under-delivery.
-#[tokio::test]
-async fn a_peers_malformed_minimum_delivery_is_f01_and_never_silently_zero() {
+async fn a_peers_reject_always_carries_the_accumulated_cost_even_at_zero() {
     let payer_signer = LocalSigner::generate("payer");
     let peer = accepting(payee(&payer_signer), bound_policy());
     let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
-    let mut request = request(
-        Some((PEER_ID, SECRET)),
-        Some(&json),
-        prepare("g.nowhere").encode(),
-    );
-    request.headers.push(MINIMUM_DELIVERY_HEADER, "twelve");
 
-    let response = peer.handle(request).await;
+    let response = peer
+        .handle(request(Some(&json), prepare("g.nowhere").encode()))
+        .await;
 
     assert_eq!(response.status, 200);
     let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
-    assert_eq!(reject.code.as_str(), "F01");
+    assert_eq!(reject.code.as_str(), "F02");
+    assert_eq!(response.headers.get(ACCUMULATED_COST_HEADER), Some("0"));
     // §6.2: the two verdicts are independent, so the claim that rode the
     // refused packet is still judged and still acknowledged.
     assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
-    // §5.2: always emitted on a REJECT, even at zero.
-    assert_eq!(response.headers.get(ACCUMULATED_COST_HEADER), Some("0"));
 }
 
 /// §1.10's bounded escape hatch: on a **dedicated** peer listener a request
-/// that fails P1 or P2 is refused outright rather than downgraded, because
+/// that fails P2 or P3 is refused outright rather than downgraded, because
 /// such a listener serves no clients -- there is no client to downgrade to
-/// and no oracle to leak. Role is still decided by P1 and P2.
+/// and no oracle to leak. Role is still decided by P2 and P3; the listener
+/// never becomes the decider.
 #[tokio::test]
 async fn a_dedicated_peer_listener_refuses_rather_than_downgrades() {
     let payer_signer = LocalSigner::generate("payer");
+    let impostor = LocalSigner::generate("impostor");
     let peer = Arc::new(PeerHttpState::new(
         payee(&payer_signer),
         bound_policy(),
@@ -993,21 +1322,26 @@ async fn a_dedicated_peer_listener_refuses_rather_than_downgrades() {
             mandatory_auth: true,
         },
     ));
+    let forged = claim_as_json(&sign_claim(&impostor, 1, 500), &impostor);
+    let proven = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
 
-    let refused = peer
-        .handle(request(None, None, prepare("g.nowhere").encode()))
+    let no_claim = peer
+        .handle(request(None, prepare("g.nowhere").encode()))
+        .await;
+    let unverified = peer
+        .handle(request(Some(&forged), prepare("g.nowhere").encode()))
         .await;
     let admitted = peer
-        .handle(request(
-            Some((PEER_ID, SECRET)),
-            None,
-            prepare("g.nowhere").encode(),
-        ))
+        .handle(request(Some(&proven), prepare("g.nowhere").encode()))
         .await;
 
-    assert_eq!(refused.status, 401);
-    assert!(refused.body.is_empty());
-    assert_eq!(admitted.status, 200, "P1 and P2 still decide the role");
+    assert_eq!(no_claim.status, 401);
+    assert!(no_claim.body.is_empty());
+    assert_eq!(
+        unverified.status, 401,
+        "a claim that fails P3 is refused too"
+    );
+    assert_eq!(admitted.status, 200, "P2 and P3 still decide the role");
 }
 
 // ─── §6.4: the flush prompt, and only a prompt ───
@@ -1030,11 +1364,7 @@ async fn a_flush_prompt_is_read_by_the_payer_and_obliges_nothing() {
     // The payer has a pending, unacknowledged claim: the payee answered it
     // with nothing at all, which §6.3 makes "not acknowledged".
     let response = peer
-        .handle(request(
-            Some((PEER_ID, SECRET)),
-            None,
-            prepare("g.nowhere").encode(),
-        ))
+        .handle(request(None, prepare("g.nowhere").encode()))
         .await;
     assert!(
         response.headers.get(FLUSH_REQUESTED_HEADER).is_none(),
@@ -1048,9 +1378,7 @@ async fn a_flush_prompt_is_read_by_the_payer_and_obliges_nothing() {
         .flush(PEER_ID, sign_claim(&payer_signer, 1, 500))
         .await;
     hints.request(PEER_ID, &channel_id());
-    let _ = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, None)
-        .await;
+    let _ = transport.forward(PEER_ID, prepare("g.nowhere"), None).await;
 
     assert!(
         transport.flush_hints(PEER_ID).is_empty(),
@@ -1067,20 +1395,17 @@ async fn a_payee_names_one_channel_per_occurrence_and_only_to_a_peer() {
     let peer = accepting_with(payee(&payer_signer), bound_policy(), Arc::clone(&hints));
     hints.request(PEER_ID, &channel_id());
     hints.request(PEER_ID, &format!("0x{:064x}", 9));
+    // A prompt rides a response to a **peer**, so these two requests have
+    // to be peer requests -- which, since ADR 0060, means each carries its
+    // own verifying claim.
+    let first = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
+    let second = claim_as_json(&sign_claim(&payer_signer, 2, 600), &payer_signer);
 
     let prompted = peer
-        .handle(request(
-            Some((PEER_ID, SECRET)),
-            None,
-            prepare("g.nowhere").encode(),
-        ))
+        .handle(request(Some(&first), prepare("g.nowhere").encode()))
         .await;
     let again = peer
-        .handle(request(
-            Some((PEER_ID, SECRET)),
-            None,
-            prepare("g.nowhere").encode(),
-        ))
+        .handle(request(Some(&second), prepare("g.nowhere").encode()))
         .await;
 
     let named = prompted.headers.get_all(FLUSH_REQUESTED_HEADER);
@@ -1095,10 +1420,11 @@ async fn a_payee_names_one_channel_per_occurrence_and_only_to_a_peer() {
         "a hint is drained when it is emitted"
     );
 
-    // §6.4: never on a response to a client interaction.
+    // §6.4: never on a response to a client interaction -- here, a request
+    // carrying no claim at all.
     hints.request(PEER_ID, &channel_id());
     let client_response = peer
-        .handle(request(None, None, prepare("g.nowhere").encode()))
+        .handle(request(None, prepare("g.nowhere").encode()))
         .await;
     assert!(client_response
         .headers
@@ -1110,21 +1436,25 @@ async fn a_payee_names_one_channel_per_occurrence_and_only_to_a_peer() {
 // terminated route carries a covering claim, or is refused with the client
 // edge's own x402 greeting ───
 
-/// No claim at all: refused with the same `F06` + x402-terms shape the
-/// client edge's own BTP carriage answers a claimless request with (issue
-/// #880, `peer-carriage-spec.md` §3.1) -- never delivered to the app.
+/// A claimless arrival reaches **no peer handling at all** (§1.2, ADR
+/// 0060). It used to reach this gate: a credential made an interaction a
+/// peering without a claim, and the gate then refused it `F06` with the
+/// x402 greeting. With role read from the claim there is no such state --
+/// a request carrying none is a client request, and the greeting a client
+/// gets is the client edge's own, covered by
+/// `connector-client-edge`'s `a_claimless_prepare_to_a_priced_route_is_refused_with_the_terms`
+/// (BTP) and its `POST /ilp` `402` unit test (HTTP).
+///
+/// What survives here is the property that matters at this layer: the app
+/// never sees it, and nothing is acknowledged.
 #[tokio::test]
-async fn a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_greeting() {
+async fn a_claimless_arrival_at_a_priced_route_reaches_no_peer_handling() {
     let payer_signer = LocalSigner::generate("payer");
     let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
     let peer = accepting(payee_with_route(&payer_signer, route), bound_policy());
 
     let response = peer
-        .handle(request(
-            Some((PEER_ID, SECRET)),
-            None,
-            prepare("g.example.app").encode(),
-        ))
+        .handle(request(None, prepare("g.example.app").encode()))
         .await;
 
     assert_eq!(
@@ -1132,14 +1462,15 @@ async fn a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_gre
         "a packet verdict, not a transport 4xx (§6.2)"
     );
     let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
-    assert_eq!(reject.code.as_str(), "F06");
-    let terms_header = response
-        .headers
-        .get(PAYMENT_REQUIRED_HEADER)
-        .expect("the x402 greeting rode the response");
-    let terms = parse_greeting(&base64_decode(terms_header)).expect("readable terms");
-    assert_eq!(terms.price(), Some(25));
-    assert_eq!(terms.pay_to(), Some("g.example.app"));
+    assert_eq!(
+        reject.code.as_str(),
+        "F02",
+        "a client-role packet reaches no peer route"
+    );
+    assert!(
+        ack_on(&response).is_none(),
+        "no claim-ack to a client (§1.7)"
+    );
 }
 
 /// A claim rides the request, but its own advance over the watermark falls
@@ -1155,7 +1486,6 @@ async fn a_claim_that_does_not_cover_the_routes_price_is_refused_the_same_way() 
 
     let response = peer
         .handle(request(
-            Some((PEER_ID, SECRET)),
             Some(&claim_as_json(&claim, &payer_signer)),
             prepare("g.example.app").encode(),
         ))
@@ -1167,6 +1497,63 @@ async fn a_claim_that_does_not_cover_the_routes_price_is_refused_the_same_way() 
     let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
     assert_eq!(reject.code.as_str(), "F06");
     assert!(response.headers.get(PAYMENT_REQUIRED_HEADER).is_some());
+}
+
+/// ADR 0065 (issue #984) at the peer gate: what a peer arrival must cover is
+/// the schedule at THAT packet's payload length, and the greeting it gets
+/// back publishes the schedule so the peer can price its next packet.
+///
+/// The specific failure this rules out: a gate that checks the route's base
+/// while the termination charges the full schedule would admit a large
+/// packet across the peering -- banking the covering claim -- and only then
+/// refuse it.
+#[tokio::test]
+async fn a_peer_claim_must_cover_the_schedule_at_this_packets_length() {
+    let payer_signer = LocalSigner::generate("payer");
+    let route = StaticRoute::new_scheduled(
+        "g.example.app",
+        "http://localhost:4000",
+        connector_domain::Price::scheduled(25, 1),
+    )
+    .unwrap();
+    let peer = accepting(payee_with_route(&payer_signer, route), bound_policy());
+
+    // ~2 KiB of sealed payload, so the slope actually bites: 25 + 1*2 = 27.
+    let mut big = prepare("g.example.app");
+    big.data = vec![0xab; 2000];
+    let expected = connector_domain::Price::scheduled(25, 1).charge(big.data.len());
+    assert_eq!(expected, 27);
+
+    // A claim covering the BASE is no longer enough for this packet.
+    let claim = sign_claim(&payer_signer, 1, 25);
+    let response = peer
+        .handle(request(
+            Some(&claim_as_json(&claim, &payer_signer)),
+            big.encode(),
+        ))
+        .await;
+
+    assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
+    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+    assert_eq!(reject.code.as_str(), "F06");
+
+    // The greeting quotes what THIS packet costs, and publishes the rule
+    // beside it so the peer need not be refused twice to learn it.
+    let terms_header = response
+        .headers
+        .get(PAYMENT_REQUIRED_HEADER)
+        .expect("a refused arrival is greeted");
+    let raw = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        terms_header.as_bytes(),
+    )
+    .expect("the greeting is base64");
+    let terms = connector_domain::x402::parse_greeting(&raw).expect("well-formed terms");
+    assert_eq!(terms.price(), Some(expected));
+    assert_eq!(
+        terms.schedule(),
+        Some(connector_domain::Price::scheduled(25, 1))
+    );
 }
 
 /// The boundary this gate exists to leave open: a claim whose advance
@@ -1232,7 +1619,6 @@ async fn a_covering_claim_is_admitted_exactly_as_today() {
 
     let response = peer
         .handle(request(
-            Some((PEER_ID, SECRET)),
             Some(&claim_as_json(&claim, &payer_signer)),
             prepare.encode(),
         ))
@@ -1251,86 +1637,148 @@ async fn a_covering_claim_is_admitted_exactly_as_today() {
     assert_eq!(app_client.deliveries().len(), 1);
 }
 
-// ─── issue #883 (child B6): the `claim_enforcement = "observe"` migration
-// knob admits and logs an uncovered peer PREPARE instead of refusing it,
-// asserted here the same way §0.1's one-pipeline invariant is asserted for
-// every other rule in this gate ───
+// ─── issue #1104: coverage is the claim's advance past the **durable**
+// watermark, so a payee restart never credits a claim with its whole
+// cumulative amount. §0.1's one pipeline: the BTP twin of each of these
+// lives in `connector-peer-btp`'s own `peer_carriage.rs` ───
 
-/// A peering flipped to `Observe` admits a claimless PREPARE to a priced
-/// route -- delivered to the app, no `F06`, no x402 greeting -- where issue
-/// #880's default (`Enforce`, proven by
-/// [`a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_greeting`])
-/// would have refused it. The HTTP twin of the BTP carriage's own test of
-/// the same name.
-#[tokio::test]
-async fn observe_admits_a_claimless_peer_prepare_the_default_would_refuse() {
-    let payer_signer = LocalSigner::generate("payer");
-    let identity_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("payee-identity"));
-    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+/// An app that actually answers `route`'s handler, so a packet the gate
+/// admits visibly **fulfils**: without the fix, issue #1104's packet is
+/// served for free rather than merely getting past one check.
+fn serving_app(route: &StaticRoute, body: &[u8]) -> Arc<FakeAppClient> {
     let app_client = Arc::new(FakeAppClient::new());
-    let response_body = b"irrelevant".to_vec();
     app_client.respond(
         route.handler_url(),
         connector_runtime::AppOutcome::Answered {
             response: connector_domain::EnvelopeResponse {
                 status: 200,
                 headers: vec![],
-                body: response_body.clone(),
+                body: body.to_vec(),
             },
         },
     );
-    let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
-    let connector = Arc::new(
-        Connector::new(
-            vec![route],
-            vec![],
-            app_client.clone(),
-            Arc::new(InProcessPeerTransport::new()),
-            clock(),
-        )
-        .with_channel_verification_key(channel_id(), counterparty)
-        .with_channel_domain(channel_id(), domain())
-        .expect("a bytes32 channel id")
-        .with_identity_signer(Arc::clone(&identity_signer)),
-    );
-    let enforcement = Arc::new(ClaimEnforcementPolicy::new(vec![(
-        PEER_ID,
-        connector_config::ClaimEnforcement::Observe,
-    )]));
-    let peer = accepting_with_enforcement(
-        connector,
+    app_client
+}
+
+/// A PREPARE genuinely sealed to [`payee_identity`] (ADR 0018/0019), with
+/// the shared secret its answer can be opened with. Orthogonal to the price
+/// gate, but what lets an admitted packet actually fulfil rather than be
+/// refused for want of sealing -- so "admitted" can be proved by the app
+/// having been reached. [`sealed_prepare_to`] at this node's own priced
+/// termination.
+fn sealed_prepare(amount: u64) -> (Prepare, [u8; 32]) {
+    sealed_prepare_to(payee_identity().as_ref(), "g.example.app", amount)
+}
+
+/// Carries this channel to cumulative 50 000 on a payee journaling to
+/// `journal`, then drops that whole node -- the state a restarted payee
+/// replays from. A FLUSH (§3): the claim header with an empty ILP body.
+async fn journal_at_fifty_thousand(payer: &LocalSigner, journal: Arc<dyn Journal>) {
+    let peer = accepting(
+        payee_journaling_to(
+            payer,
+            priced_route(),
+            Arc::new(FakeAppClient::new()),
+            journal,
+        ),
         bound_policy(),
-        enforcement,
-        Arc::new(FlushHints::new()),
     );
-
-    let envelope = connector_domain::EnvelopeRequest {
-        method: "POST".to_string(),
-        target: "/".to_string(),
-        headers: vec![],
-        body: b"hello".to_vec(),
-    };
-    let identity_public = identity_signer.public_key().expect("identity public key");
-    let (data, shared_secret) =
-        connector_signer::giftwrap::seal_request(&envelope.encode(), &identity_public)
-            .expect("seal");
-    let condition = connector_domain::derive_condition(
-        &connector_signer::giftwrap::derive_fulfillment(&shared_secret),
-    );
-    let prepare = Prepare {
-        amount: 25,
-        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
-        execution_condition: condition,
-        destination: "g.example.app".to_string(),
-        data,
-    };
-
-    // No claim at all -- the `Some((PEER_ID, SECRET))` header is only the
-    // credential; the third argument is the claim, and it is `None`.
+    let claim = sign_claim(payer, 1, 50_000);
     let response = peer
-        .handle(request(Some((PEER_ID, SECRET)), None, prepare.encode()))
+        .handle(request(Some(&claim_as_json(&claim, payer)), Vec::new()))
+        .await;
+    assert_eq!(
+        ack_on(&response),
+        Some(ClaimAckOutcome::Accepted),
+        "the pre-restart claim is what the journal records"
+    );
+}
+
+/// The bug: after a restart `ClaimBook` has replayed its journal and is at
+/// cumulative 50 000, while `AcceptedClaims` -- in-memory and per-process
+/// -- is empty. A claim at cumulative 50 001 is one unit of genuinely new
+/// money and cannot buy a packet priced at 25. Measured against the empty
+/// per-process record it would be credited with all 50 001 and buy it
+/// (issue #1104).
+#[tokio::test]
+async fn a_restart_does_not_credit_a_claim_with_the_amount_it_already_paid() {
+    let payer_signer = LocalSigner::generate("payer");
+    let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+    journal_at_fifty_thousand(&payer_signer, Arc::clone(&journal)).await;
+
+    // The restart: a second node over the same journal and nothing else.
+    let route = priced_route();
+    let app_client = serving_app(&route, b"free service");
+    let peer = accepting(
+        payee_journaling_to(
+            &payer_signer,
+            route,
+            Arc::clone(&app_client),
+            Arc::clone(&journal),
+        ),
+        bound_policy(),
+    );
+
+    let claim = sign_claim(&payer_signer, 2, 50_001); // advances 1, the price is 25
+    let (prepare, _) = sealed_prepare(25);
+    let response = peer
+        .handle(request(
+            Some(&claim_as_json(&claim, &payer_signer)),
+            prepare.encode(),
+        ))
         .await;
 
+    assert_eq!(
+        ack_on(&response),
+        Some(ClaimAckOutcome::Accepted),
+        "the claim itself is good -- its nonce and amount both advance the durable watermark, \
+         which is why the book's verdict cannot catch this on its own"
+    );
+    let reject = connector_domain::Reject::decode(&response.body)
+        .expect("a reject -- anything else means the app served this for free");
+    assert_eq!(reject.code.as_str(), "F06");
+    assert!(
+        response.headers.get(PAYMENT_REQUIRED_HEADER).is_some(),
+        "the x402 greeting rides it"
+    );
+    assert!(
+        app_client.deliveries().is_empty(),
+        "one unit of new money must not buy a packet priced at 25"
+    );
+}
+
+/// The other side of the same boundary: after the same restart, a claim
+/// that genuinely advances the durable watermark by the price is admitted
+/// and reaches the app. The fix must not make a restart refuse real money.
+#[tokio::test]
+async fn a_restart_still_admits_a_claim_that_genuinely_advances_by_the_price() {
+    let payer_signer = LocalSigner::generate("payer");
+    let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+    journal_at_fifty_thousand(&payer_signer, Arc::clone(&journal)).await;
+
+    let route = priced_route();
+    let response_body = b"served after the restart".to_vec();
+    let app_client = serving_app(&route, &response_body);
+    let peer = accepting(
+        payee_journaling_to(
+            &payer_signer,
+            route,
+            Arc::clone(&app_client),
+            Arc::clone(&journal),
+        ),
+        bound_policy(),
+    );
+
+    let claim = sign_claim(&payer_signer, 2, 50_025); // advances exactly the price
+    let (prepare, shared_secret) = sealed_prepare(25);
+    let response = peer
+        .handle(request(
+            Some(&claim_as_json(&claim, &payer_signer)),
+            prepare.encode(),
+        ))
+        .await;
+
+    assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
     assert!(
         response.headers.get(PAYMENT_REQUIRED_HEADER).is_none(),
         "an admitted packet carries no greeting"
@@ -1343,43 +1791,17 @@ async fn observe_admits_a_claimless_peer_prepare_the_default_would_refuse() {
     assert_eq!(app_client.deliveries().len(), 1);
 }
 
-/// A migration is per peering, not global: a second peer id this policy has
-/// no `Observe` entry for still reads `Enforce` -- the safe default -- even
-/// though `ClaimEnforcementPolicy` is non-empty.
-#[tokio::test]
-async fn observe_for_one_peer_does_not_widen_to_a_peer_with_no_entry() {
-    let payer_signer = LocalSigner::generate("payer");
-    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
-    let enforcement = Arc::new(ClaimEnforcementPolicy::new(vec![(
-        "some-other-peer",
-        connector_config::ClaimEnforcement::Observe,
-    )]));
-    let peer = accepting_with_enforcement(
-        payee_with_route(&payer_signer, route),
-        bound_policy(),
-        enforcement,
-        Arc::new(FlushHints::new()),
-    );
-
-    let response = peer
-        .handle(request(
-            Some((PEER_ID, SECRET)),
-            None,
-            prepare("g.example.app").encode(),
-        ))
-        .await;
-
-    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
-    assert_eq!(reject.code.as_str(), "F06");
-    assert!(response.headers.get(PAYMENT_REQUIRED_HEADER).is_some());
-}
-
 /// PR #913 review finding: a claim signed by a non-counterparty key still
 /// *decodes* and can declare any `cumulative_amount` it likes -- coverage
 /// judged off that declared amount, ignoring the claim book's own verdict,
-/// let an unlimited-value, never-verified claim buy service. The verdict
-/// here is `signature_invalid`; coverage must be refused regardless of the
-/// amount declared, exactly like a claimless PREPARE.
+/// let an unlimited-value, never-verified claim buy service.
+///
+/// Since ADR 0060 that claim fails P3, so the request is a **client**
+/// request and there is no `Toon-Claim-Ack` to carry `signature_invalid`
+/// back: §1.7 forbids one on a client interaction, and the sender learns
+/// from the greeting the client edge gives it, not from an ack. What this
+/// test still pins is the finding itself -- the declared amount buys
+/// nothing, and the app never sees the packet.
 #[tokio::test]
 async fn a_forged_claim_declaring_a_large_amount_does_not_buy_coverage() {
     let payer_signer = LocalSigner::generate("payer");
@@ -1406,21 +1828,18 @@ async fn a_forged_claim_declaring_a_large_amount_does_not_buy_coverage() {
 
     let response = peer
         .handle(request(
-            Some((PEER_ID, SECRET)),
             Some(&claim_as_json(&claim, &impostor)),
             prepare("g.example.app").encode(),
         ))
         .await;
 
-    assert_eq!(
-        ack_on(&response),
-        Some(ClaimAckOutcome::Rejected(
-            ClaimRejectReason::SignatureInvalid
-        ))
+    assert!(
+        ack_on(&response).is_none(),
+        "a claim that fails P3 makes the request a client's, and a client \
+         interaction never carries a claim-ack (§1.7)"
     );
     let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
-    assert_eq!(reject.code.as_str(), "F06");
-    assert!(response.headers.get(PAYMENT_REQUIRED_HEADER).is_some());
+    assert_eq!(reject.code.as_str(), "F02");
     assert!(
         app_client.deliveries().is_empty(),
         "a forged claim must never reach the app"
@@ -1466,7 +1885,6 @@ async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
     let first = sign_claim(&payer_signer, 1, 25);
     let flush_response = peer
         .handle(request(
-            Some((PEER_ID, SECRET)),
             Some(&claim_as_json(&first, &payer_signer)),
             Vec::new(),
         ))
@@ -1481,7 +1899,6 @@ async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
     for attempt in 0..2 {
         let response = peer
             .handle(request(
-                Some((PEER_ID, SECRET)),
                 Some(&replayed_json),
                 prepare("g.example.app").encode(),
             ))
@@ -1512,6 +1929,285 @@ async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
         watermark.cumulative_amount, 25,
         "the replayed claim's declared amount must never advance the watermark"
     );
+}
+
+// ─── ADR 0042 item 3: a forwarded arrival must cover its own `amount`,
+// behind a per-peer knob that defaults to observing. The HTTP twins of the
+// BTP carriage's own tests of the same names -- §0.1's one pipeline cannot
+// admit over one carriage what it refuses over the other ───
+
+/// **The default is still `observe`, and this is what that means.** A
+/// peering that configures nothing carries an **under-covered** forwarded
+/// arrival -- admitted, logged, and actually forwarded to the next hop. It
+/// was written as a fleet-safety guard when both devnet boxes forwarded to
+/// each other; issue #872 removed both peerings, so what it guards now is
+/// the migration default itself, which ADR 0042 item 3 keeps for a
+/// counterparty on an older binary. Note what this fixture must ALSO have
+/// since issue #1145: its own `[[pay_channels]]` row (`covering`).
+/// Admitting an arrival for free says nothing about what this node then
+/// sends, and what it sends is covered unconditionally.
+///
+/// The arrival carries a claim that verifies but advances too little,
+/// rather than no claim at all: since ADR 0060 a claimless arrival is a
+/// client's and never reaches this gate. `observe` still selects between
+/// admitting and refusing everything else it always did.
+#[tokio::test]
+async fn a_forwarded_arrival_that_undercovers_is_admitted_by_default() {
+    let payer_signer = LocalSigner::generate("payer");
+    let (connector, next_hop_app, next_hop_identity) = forwarding_payee(&payer_signer);
+    // The default policy: no entry for this peering at all, exactly as an
+    // unconfigured `[[peers]]` row resolves.
+    let peer = accepting(connector, bound_policy());
+    let (sealed, shared_secret) = sealed_prepare_to(
+        next_hop_identity.as_ref(),
+        FORWARDED_DESTINATION,
+        ARRIVING_AMOUNT,
+    );
+    let short = sign_claim(&payer_signer, 1, ARRIVING_AMOUNT - 1);
+
+    let response = peer
+        .handle(request(
+            Some(&claim_as_json(&short, &payer_signer)),
+            sealed.encode(),
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert!(
+        response.headers.get(PAYMENT_REQUIRED_HEADER).is_none(),
+        "an admitted packet carries no greeting"
+    );
+    let fulfill = connector_domain::Fulfill::decode(&response.body).expect("a fulfil");
+    let opened = connector_signer::giftwrap::open_response(&shared_secret, &fulfill.data)
+        .expect("open the sealed fulfil");
+    let opened = connector_domain::EnvelopeResponse::decode(&opened).expect("decode envelope");
+    assert_eq!(opened.body, b"delivered by the next hop");
+    assert_eq!(
+        next_hop_app.deliveries().len(),
+        1,
+        "the packet was really carried, not merely not refused"
+    );
+}
+
+/// The same arrival on a peering an operator has flipped: refused `F06`
+/// with the x402 greeting, quoting the packet's own `amount` -- and never
+/// carried, so the next hop does no work this connector was not paid for.
+#[tokio::test]
+async fn a_forwarded_arrival_that_undercovers_is_refused_once_this_peering_enforces() {
+    let payer_signer = LocalSigner::generate("payer");
+    let (connector, next_hop_app, next_hop_identity) = forwarding_payee(&payer_signer);
+    let peer = accepting_with_enforcement(
+        connector,
+        bound_policy(),
+        forwarded_enforcing(),
+        Arc::new(FlushHints::new()),
+    );
+    let (sealed, _) = sealed_prepare_to(
+        next_hop_identity.as_ref(),
+        FORWARDED_DESTINATION,
+        ARRIVING_AMOUNT,
+    );
+    let short = sign_claim(&payer_signer, 1, ARRIVING_AMOUNT - 1);
+
+    let response = peer
+        .handle(request(
+            Some(&claim_as_json(&short, &payer_signer)),
+            sealed.encode(),
+        ))
+        .await;
+
+    assert_eq!(
+        response.status, 200,
+        "a packet verdict, not a transport 4xx (§6.2)"
+    );
+    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+    assert_eq!(reject.code.as_str(), "F06");
+    let terms_header = response
+        .headers
+        .get(PAYMENT_REQUIRED_HEADER)
+        .expect("the x402 greeting rode the response");
+    let terms = parse_greeting(&base64_decode(terms_header)).expect("readable terms");
+    assert_eq!(
+        terms.price(),
+        Some(ARRIVING_AMOUNT),
+        "a forwarded arrival is quoted the packet's own amount, not the route's price"
+    );
+    assert_eq!(terms.pay_to(), Some(FORWARDED_DESTINATION));
+    assert!(
+        next_hop_app.deliveries().is_empty(),
+        "a refused arrival is never carried"
+    );
+}
+
+/// A claim advancing the full arriving `amount` is admitted under **either**
+/// setting: enforcing changes what an uncovered packet gets, never what a
+/// covered one gets.
+#[tokio::test]
+async fn a_claim_covering_the_arriving_amount_is_admitted_under_either_setting() {
+    for enforcement in [
+        Arc::new(ClaimEnforcementPolicy::default()),
+        forwarded_enforcing(),
+    ] {
+        let payer_signer = LocalSigner::generate("payer");
+        let (connector, next_hop_app, next_hop_identity) = forwarding_payee(&payer_signer);
+        let peer = accepting_with_enforcement(
+            connector,
+            bound_policy(),
+            enforcement,
+            Arc::new(FlushHints::new()),
+        );
+        let (sealed, shared_secret) = sealed_prepare_to(
+            next_hop_identity.as_ref(),
+            FORWARDED_DESTINATION,
+            ARRIVING_AMOUNT,
+        );
+        let claim = sign_claim(&payer_signer, 1, ARRIVING_AMOUNT);
+
+        let response = peer
+            .handle(request(
+                Some(&claim_as_json(&claim, &payer_signer)),
+                sealed.encode(),
+            ))
+            .await;
+
+        assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
+        assert!(
+            response.headers.get(PAYMENT_REQUIRED_HEADER).is_none(),
+            "an admitted packet carries no greeting"
+        );
+        let fulfill = connector_domain::Fulfill::decode(&response.body).expect("a fulfil");
+        let opened = connector_signer::giftwrap::open_response(&shared_secret, &fulfill.data)
+            .expect("open the sealed fulfil");
+        let opened = connector_domain::EnvelopeResponse::decode(&opened).expect("decode envelope");
+        assert_eq!(opened.body, b"delivered by the next hop");
+        assert_eq!(next_hop_app.deliveries().len(), 1);
+    }
+}
+
+/// **Which figure must be covered**, stated as the three near misses: not
+/// the forwarded route's client-edge `price` (ADR 0028 says that is a fact
+/// about this node's *client* edge), not the post-fee amount this hop passes
+/// on (that is what this hop covers to the next hop, and the difference it
+/// keeps is its fee, ADR 0010), and not one unit short. Only the arriving
+/// `amount` covers an arriving packet.
+#[tokio::test]
+async fn a_claim_advancing_less_than_the_arriving_amount_never_covers_it() {
+    for advance in [
+        FORWARD_ROUTE_PRICE,
+        ARRIVING_AMOUNT - FORWARD_FEE,
+        ARRIVING_AMOUNT - 1,
+    ] {
+        let payer_signer = LocalSigner::generate("payer");
+        let (connector, next_hop_app, next_hop_identity) = forwarding_payee(&payer_signer);
+        let peer = accepting_with_enforcement(
+            connector,
+            bound_policy(),
+            forwarded_enforcing(),
+            Arc::new(FlushHints::new()),
+        );
+        let (sealed, _) = sealed_prepare_to(
+            next_hop_identity.as_ref(),
+            FORWARDED_DESTINATION,
+            ARRIVING_AMOUNT,
+        );
+        let claim = sign_claim(&payer_signer, 1, advance);
+
+        let response = peer
+            .handle(request(
+                Some(&claim_as_json(&claim, &payer_signer)),
+                sealed.encode(),
+            ))
+            .await;
+
+        // The claim is perfectly valid and is still acknowledged: the two
+        // verdicts stay independent (§6.2).
+        assert_eq!(
+            ack_on(&response),
+            Some(ClaimAckOutcome::Accepted),
+            "advance {advance}"
+        );
+        let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+        assert_eq!(reject.code.as_str(), "F06", "advance {advance}");
+        assert!(
+            response.headers.get(PAYMENT_REQUIRED_HEADER).is_some(),
+            "advance {advance}"
+        );
+        assert!(
+            next_hop_app.deliveries().is_empty(),
+            "advance {advance} was never carried"
+        );
+    }
+}
+
+/// ADR 0029's rule is **untouched** by ADR 0042, and since issue #1077 it
+/// has no escape hatch at all: an arrival at a priced termination that does
+/// not cover the route's price is refused under **every** setting a peering
+/// can carry -- `forwarded_claim_enforcement` selects nothing here, because
+/// it is the *forwarded* rule's knob. The HTTP twin of the BTP carriage's
+/// own test of the same name.
+///
+/// The arrival carries an under-covering claim rather than none: since ADR
+/// 0060 a claimless one is a client's and never reaches this gate at all.
+#[tokio::test]
+async fn no_peering_setting_admits_an_uncovered_arrival_at_a_priced_termination() {
+    for forwarded in [
+        connector_config::ForwardedClaimEnforcement::Observe,
+        connector_config::ForwardedClaimEnforcement::Enforce,
+    ] {
+        let payer_signer = LocalSigner::generate("payer");
+        let identity: Arc<dyn Signer> = Arc::new(LocalSigner::generate("payee-identity"));
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        app_client.respond(
+            route.handler_url(),
+            connector_runtime::AppOutcome::Answered {
+                response: connector_domain::EnvelopeResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: b"terminated here".to_vec(),
+                },
+            },
+        );
+        let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
+        let connector = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                clock(),
+            )
+            .with_channel_verification_key(channel_id(), counterparty)
+            .with_channel_domain(channel_id(), domain())
+            .expect("a bytes32 channel id")
+            .with_identity_signer(Arc::clone(&identity)),
+        );
+        let peer = accepting_with_enforcement(
+            connector,
+            bound_policy(),
+            Arc::new(ClaimEnforcementPolicy::of(vec![(PEER_ID, forwarded)])),
+            Arc::new(FlushHints::new()),
+        );
+        let (sealed, _) = sealed_prepare_to(identity.as_ref(), "g.example.app", 25);
+        let short = sign_claim(&payer_signer, 1, 1); // the price is 25
+
+        let response = peer
+            .handle(request(
+                Some(&claim_as_json(&short, &payer_signer)),
+                sealed.encode(),
+            ))
+            .await;
+
+        assert!(
+            connector_domain::Reject::decode(&response.body)
+                .is_ok_and(|reject| reject.code.as_str() == "F06"),
+            "forwarded_claim_enforcement = {forwarded}"
+        );
+        assert!(
+            response.headers.get(PAYMENT_REQUIRED_HEADER).is_some(),
+            "forwarded_claim_enforcement = {forwarded}"
+        );
+    }
 }
 
 // ─── §7.2: the claim race, and its mitigation ───

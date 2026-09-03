@@ -1,5 +1,7 @@
 # A terminating connector derives the fulfilment it is paid against
 
+**Status:** Accepted. Bounded by [0032](0032-a-client-destination-is-never-a-route-termination.md), extended by [0064](0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md) — which states the one condition under which a termination declines to derive at all: the packet's deadline fired before the app answered (#1183). Live: `Connector::deliver_opened_envelope`. The `TOON-Fulfillment` header it retires is gone from `crates/`.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 At a route termination the connector derives the packet's fulfilment from the secret in the gift
@@ -16,7 +18,8 @@ terminating one (relaying an app's) from producing a valid fulfilment without th
 actual participation", and never accepts "a fulfilment this connector invents itself".
 
 That rule and envelope delivery cannot both hold. The prototype's own normative contract says so —
-`docs/local-delivery-fulfillment-contract.md`, rule 5:
+`docs/local-delivery-fulfillment-contract.md` (deleted with the prototype, readable in git
+history), rule 5:
 
 > Handlers that structurally cannot supply preimages (e.g. the #216 HTTP reverse-proxy for
 > terminated routes) fulfill without one and are therefore converted to F99 by rule 3; do not point

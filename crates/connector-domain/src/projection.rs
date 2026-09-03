@@ -33,7 +33,7 @@ pub enum JournalEntry {
     },
     /// A signed claim on `channel_id` was verified and accepted, advancing
     /// that channel's watermark to `nonce`/`cumulative_amount`
-    /// (`ClaimBook::accept_inbound`, peer-wire-spec.md §3.4). `signature` is
+    /// (`ClaimBook::accept_inbound`, peer-semantics-pre-868.md §3.4). `signature` is
     /// carried through opaque (chain- and scheme-specific verification
     /// already happened before this entry is ever appended) and durably
     /// retained rather than discarded once accepted: on-chain redemption
@@ -54,6 +54,49 @@ pub enum JournalEntry {
     /// pre-#882 build already wrote still decodes; [`Projection::apply`]
     /// folds it into nothing.
     InboundFulfillmentRecorded { channel_id: String, amount: u64 },
+    /// `channel_id`'s watermark was durably reset because this connector
+    /// discovered the chain no longer vouches for it -- settled,
+    /// deallocated, or otherwise gone (issue #977). Written only by
+    /// `connector_client_edge::ClientClaimGate::reset_watermark`, into the
+    /// client edge's own journal -- a channel's deterministic on-chain
+    /// address means a reopened channel reuses the exact key its settled
+    /// predecessor's watermark was filed under, and without this entry a
+    /// reopened channel would inherit that predecessor's watermark forever,
+    /// charging its payer again for units already settled on chain (or, at
+    /// the limit, refusing every claim it could ever present). Folds into
+    /// nothing here: [`Projection`] tracks the peer semantics's own book, which
+    /// this entry kind is never written to (see the client edge's own
+    /// journal file, kept separate from the peer semantics's for exactly this
+    /// reason) -- it is in this shared alphabet only so both journals'
+    /// entries decode through one enum, matching every other entry kind
+    /// here.
+    InboundClaimWatermarkReset { channel_id: String },
+    /// `channel_id`'s watermark was durably rolled back to `nonce`/
+    /// `cumulative_amount` because the PREPARE the claim that reached that
+    /// watermark covered is now known never to have been carried: a
+    /// client-priced forwarded route (ADR 0028) admits the client's claim
+    /// before learning whether the next hop will fulfil it, and the next
+    /// hop's own terminal reject (F06 after a covered retry, T01
+    /// unreachable) is discoverable only after admission (issue #1012).
+    /// Written only by `connector_client_edge::ClientClaimGate::roll_back`,
+    /// into the client edge's own journal, immediately after the
+    /// `InboundClaimAccepted` entry it undoes -- never speculatively, and
+    /// never for a claim a later admission has already superseded.
+    ///
+    /// Unlike `InboundClaimAccepted`, whose replay folds by componentwise
+    /// max (this module's own doc), a replay of this entry SETS the
+    /// watermark directly, matching `InboundClaimWatermarkReset`: it exists
+    /// specifically to move a watermark down, which a legitimately
+    /// advancing claim never does, so folding it by max would silently
+    /// undo the very thing it records. Folds into nothing here: like
+    /// `InboundClaimWatermarkReset`, this entry kind is written only to the
+    /// client edge's own journal, and [`Projection`] tracks the peer
+    /// wire's own book.
+    InboundClaimRolledBack {
+        channel_id: String,
+        nonce: u64,
+        cumulative_amount: u64,
+    },
 }
 
 /// Balances, derived in memory by folding a journal (ADR 0005). Never a
@@ -110,6 +153,12 @@ impl Projection {
             // pre-#882 journal may still carry these, but nothing is
             // tracked from them any more.
             JournalEntry::InboundFulfillmentRecorded { .. } => {}
+            // Written only to the client edge's own journal, never this
+            // one (issue #977) -- see the variant's own doc.
+            JournalEntry::InboundClaimWatermarkReset { .. } => {}
+            // Written only to the client edge's own journal, never this
+            // one (issue #1012) -- see the variant's own doc.
+            JournalEntry::InboundClaimRolledBack { .. } => {}
         }
     }
 

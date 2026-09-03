@@ -15,6 +15,7 @@
 //! accounting it reported.
 
 use chrono::{DateTime, Utc};
+use connector_domain::Price;
 use connector_settlement::{ChannelState, ChannelStatus};
 use serde::{Deserialize, Serialize};
 
@@ -30,15 +31,20 @@ pub enum RouteSource {
     Runtime,
 }
 
-/// A static route as seen by the operator surface. `price` is the flat
-/// per-packet amount a claim must advance by to pay for this route (issue
-/// #520) -- always present, since a terminated route is never silently
-/// free.
+/// A static route as seen by the operator surface. `price` is the schedule a
+/// claim must advance by to pay for this route (issue #520, ADR 0065) --
+/// always present, since a terminated route is never silently free.
+///
+/// It rides in the operator's own spelling: a bare integer for a flat price,
+/// a `{ base, per_kib }` object for one with a slope, exactly as the config
+/// file writes it. So this row is byte-identical to what it was before
+/// schedules existed for every flat route, and an operator reading one back
+/// sees the shape they would write.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteView {
     pub prefix: String,
     pub handler_url: String,
-    pub price: u64,
+    pub price: Price,
 }
 
 /// A leased route (issue #427) as seen by the operator surface -- only
@@ -47,7 +53,6 @@ pub struct RouteView {
 pub struct LeasedRouteView {
     pub prefix: String,
     pub peer_id: String,
-    pub fee: u64,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -60,14 +65,21 @@ pub struct LeasedRouteView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerView {
     pub id: String,
+    /// This peering's flat per-packet fee (ADR 0010, ADR 0061): what this
+    /// connector retains for carrying one packet to it. Reported here
+    /// rather than on [`PeerRouteView`] because it is a property of the
+    /// counterparty, not of any prefix routed to it.
+    pub fee: u64,
+    /// ADR 0049's cap: the largest amount this connector will forward to
+    /// this peering in one packet. Always a number, never absent -- a
+    /// peering that states none keeps
+    /// [`connector_config::DEFAULT_MAX_PACKET_AMOUNT`], and reporting the
+    /// bound that is actually enforced is the whole point of reporting it
+    /// (0049: *"the operator surface must be able to express a cap"*, and
+    /// an operator who cannot read one back cannot tell whether their
+    /// write landed).
+    pub max_packet_amount: u64,
     pub source: RouteSource,
-    /// When this peer's peer-sale lease lapses and it is demoted back to
-    /// client role (issue #886) -- `None` for a config-file row (never
-    /// leased) or a runtime row added over the plain `POST /peers`
-    /// surface (a permanent grant, exactly as every runtime peer was
-    /// before #886); `Some` only for one a peer-sale purchase inserted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// A peer-forwarding route (as opposed to [`RouteView`]'s app-terminating
@@ -75,13 +87,14 @@ pub struct PeerView {
 /// `[[routes]]`'s peer form (`source: Config`) plus every row added at
 /// runtime (`source: Runtime`). Deliberately excludes a leased route
 /// (issue #427) -- [`LeasedRouteView`] already reports those, and a lease
-/// carries no `price` at all, unlike either of these.
+/// carries no `price` at all, unlike either of these. Neither carries a
+/// `fee`: that attaches to the peering, and is reported on [`PeerView`]
+/// (ADR 0061).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerRouteView {
     pub prefix: String,
     pub peer_id: String,
-    pub fee: u64,
-    pub price: u64,
+    pub price: Price,
     pub source: RouteSource,
 }
 
@@ -96,7 +109,18 @@ pub struct ChannelView {
     pub id: String,
     pub counterparty: String,
     pub status: ChannelViewStatus,
+    /// What the counterparty has deposited on their own side -- the
+    /// collateral backing claims this node can redeem. Keeps its name and
+    /// its meaning across issue #1118; what changed is that
+    /// `POST /channels/:id/fund` no longer moves it.
     pub deposited: u128,
+    /// What this node has deposited on its own side -- the collateral
+    /// backing claims this node signs, and what
+    /// `POST /channels/:id/fund` raises (issue #1118). Added rather than
+    /// replacing `deposited`, so a reader of `GET /channels` sees both
+    /// halves of a two-sided channel instead of one number whose side
+    /// depended on who was asking.
+    pub own_deposited: u128,
     pub redeemed: u128,
 }
 
@@ -125,7 +149,8 @@ impl From<ChannelState> for ChannelView {
                 ChannelStatus::Closed => ChannelViewStatus::Closed,
                 ChannelStatus::Settled => ChannelViewStatus::Settled,
             },
-            deposited: state.deposited,
+            deposited: state.counterparty_deposited,
+            own_deposited: state.own_deposited,
             redeemed: state.redeemed,
         }
     }
@@ -147,7 +172,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 /// connector has claimed to the peer ([`ClaimDirection::Outbound`]) and
 /// what the peer has claimed to this connector
 /// ([`ClaimDirection::Inbound`], i.e. this connector's own watermark on
-/// that channel). `peer_id` is `None` on an inbound entry: the peer wire
+/// that channel). `peer_id` is `None` on an inbound entry: the peer semantics
 /// has no identity handshake yet, so an inbound claim is known only by the
 /// channel it names, not by which configured peer sent it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +186,14 @@ pub struct ClaimView {
     /// always `false` for an inbound claim, which is accepted or rejected
     /// the instant it is received, never left pending.
     pub pending: bool,
+    /// Which of this node's two claim books this entry came from (issue
+    /// #1218): [`ClaimBookKind::Peer`] for everything above, which is
+    /// always `crate::ClaimBook`'s own -- `connector-operator` is the one
+    /// caller that also merges in [`ClaimBookKind::Client`] entries, read
+    /// from `connector_client_edge::ClientClaimGate`, a second book this
+    /// crate has no dependency on and so cannot tag itself. An additive
+    /// field: every row this crate itself produces is `Peer`.
+    pub book: ClaimBookKind,
 }
 
 /// Which side of a peering relation a [`ClaimView`] reports on.
@@ -169,4 +202,18 @@ pub struct ClaimView {
 pub enum ClaimDirection {
     Outbound,
     Inbound,
+}
+
+/// Which claim book a [`ClaimView`] was read out of (issue #1218): the
+/// peer semantics's own `crate::ClaimBook`, journaled to
+/// `peer-claims.log`, or the client edge's
+/// `connector_client_edge::ClientClaimGate`, journaled separately to
+/// `client-edge-claims.log`. The two never merge (`two_ledgers_never_merge.rs`);
+/// this field says which one a given row answers for, since `GET /claims`
+/// now reads both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaimBookKind {
+    Peer,
+    Client,
 }

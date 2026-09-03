@@ -1,0 +1,274 @@
+# =============================================================================
+# local/two-hop -- two connectors, one peering, a packet that crosses it.
+#
+# Merged ON TOP of the repository-root docker-compose.yml so the chains are the
+# SAME services `make anvil-up` brings up, on one network:
+#
+#   docker compose -f docker-compose.yml -f local/two-hop/compose.yml \
+#     --profile evm --profile solana --profile two-hop up -d
+#
+# `make local-up LOCAL_TOPOLOGY=two-hop` does exactly that. One compose project
+# means one network, which means the connectors reach the chain and each other
+# by service name -- `anvil:8545`, `connector-b:3000`.
+#
+# This is the containerised counterpart of `crates/connector-bin/tests/
+# two_connectors_peer.rs`, which proves the same peering in-process against an
+# anvil it spawns per test. What that cannot say anything about is the image:
+# two of them, as uid 10001, each with its own mounted config, its own key
+# files and its own state volume, discovering each other over a container
+# network. That is this.
+# =============================================================================
+
+services:
+  # ── The payment-oblivious app, behind B ────────────────────────────────────
+  # The connector image's second binary. Not published: only B dials it, which
+  # is what makes "the app was reached" evidence that a packet crossed the
+  # peering rather than something the host could arrange directly.
+  stub-app:
+    image: connector-rust:local
+    profiles: [two-hop]
+    entrypoint: ['/usr/local/bin/stub-app']
+    command: ['0.0.0.0:3100']
+    expose:
+      - '3100'
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+  # ── B: the accepting half ──────────────────────────────────────────────────
+  # Started first, and A waits on its health gate: A dials B, and a peering
+  # whose far side is not yet serving answers `T01 peer unreachable` rather
+  # than failing loudly, so bringing them up in an undefined order would make
+  # the first rehearsal a coin toss.
+  connector-b:
+    image: connector-rust:local
+    profiles: [two-hop]
+    command: ['/app/config/connector.toml']
+    # PATHS ARE RELATIVE TO THE REPOSITORY ROOT, not to this file. Compose
+    # resolves relative bind mounts against the PROJECT directory, which is the
+    # directory of the FIRST `-f` file -- always ./docker-compose.yml here.
+    volumes:
+      - ./local/two-hop/connector-b.toml:/app/config/connector.toml:ro
+      # Written by local/keys.sh, gitignored, never committed (ADR 0012). One
+      # directory per node, named after this service.
+      - ./local/.keys/two-hop/connector-b:/app/data:ro
+      # A NAMED volume, not a bind mount: the image creates /app/state owned by
+      # uid 10001 so a fresh named volume inherits that ownership. A host bind
+      # mount arrives root-owned and the connector refuses to start.
+      - two-hop-b-state:/app/state
+    ports:
+      # Published to loopback only, on a port no other topology uses so two of
+      # them can be up at once without a collision the operator has to diagnose.
+      - '127.0.0.1:3002:3000'
+    depends_on:
+      anvil:
+        condition: service_healthy
+      stub-app:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      # GET /ilp/identity is unauthenticated and free, and answering it means
+      # the config loaded, the settlement backend connected, and the router is
+      # serving. `docker ps` showing "Up" proves none of that.
+      #
+      # 127.0.0.1, NOT localhost. `client_edge_addr = "0.0.0.0:3000"` binds
+      # IPv4 only, while `localhost` inside the container resolves `::1` first
+      # -- so busybox wget gets "Connection refused" from a healthy connector.
+      test:
+        ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── A: the forwarding half, and the node the rehearsal is handed to ────────
+  connector-a:
+    image: connector-rust:local
+    profiles: [two-hop]
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./local/two-hop/connector-a.toml:/app/config/connector.toml:ro
+      - ./local/.keys/two-hop/connector-a:/app/data:ro
+      - two-hop-a-state:/app/state
+    ports:
+      - '127.0.0.1:3001:3000'
+    depends_on:
+      anvil:
+        condition: service_healthy
+      connector-b:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── The rehearsal ──────────────────────────────────────────────────────────
+  # Its own profile so `up` never starts it: a one-shot that exits 0 or 1, run
+  # by `make local-rehearse` via `docker compose run --rm`.
+  #
+  # TWO packets, and NOT for the reason a postpay peering needed two. Under the
+  # deleted postpay convention (ADR 0004, gone in issue #1145) a peering owed
+  # after the fact and could not pay for its own first crossing, so a rehearsal
+  # sent one packet to prove DELIVERY and a second to carry the claim covering
+  # it. Nothing owes after the fact now: A holds a `[[pay_channels]]` row (ADR
+  # 0042 item 2, required since #1145) and covers each PREPARE BEFORE it is
+  # sent, so crossing 1 arrives already paid for. That is exactly what lets B
+  # price the route it terminates, and pricing it is what this topology is for.
+  #
+  # The second crossing is what makes this a measurement rather than a
+  # demonstration, because it is the one issue #1102 broke. A covering payer
+  # asks the payee where its claims stand on every packet, and a payee that
+  # answers out of the wrong book says nonce 0 / cumulative 0 forever -- so
+  # crossing 2 re-signs crossing 1's cumulative amount at a fresh nonce,
+  # advances nothing, and is refused `F06`. One crossing cannot see that; two
+  # can, and did.
+  #
+  # Then the money is asserted from B's own claim journal, because the exit
+  # status is not enough on its own. #1101 proved that by breaking this
+  # peering's EIP-712 `chain_id` and watching every packet still FULFILL: a
+  # peer claim's verdict rides back in `Toon-Claim-Ack` and never gates the
+  # packet (`handle_peer_prepare` -- the ack and the answer are separate). A
+  # priced termination does turn an UNCOVERED arrival into an F06 the sender
+  # sees, but nothing in this container can check that the price is still
+  # there to be paid; `local_topologies_load.rs` holds PRICE, AMOUNT and both
+  # committed configs to one figure, which is the half this container cannot
+  # do. What this container CAN read is what B wrote down -- every accepted
+  # claim on the peering's channel and what each one actually advanced -- and
+  # that advance is the exact quantity the coverage gate charges against
+  # (`price_gate::payment_required`). So that is what is asserted: fewer
+  # accepted claims than crossings, or any one of them advancing less than the
+  # price, fails the run. A claim that merely EXISTS proves nothing here --
+  # that is what a `nonce 2 -> 1000` repeat is.
+  #
+  # And since #1144 the same journal answers the other half of the money
+  # question: WHAT A KEPT. A collects the packet's `AMOUNT` and its claim to B
+  # advances by what it forwarded, so `AMOUNT - advance` is this hop's earnings
+  # -- ADR 0010's rule ("the difference between the cumulative it receives from
+  # upstream and the cumulative it sends downstream") measured on a running
+  # image rather than restated from A's config. It must equal A's `fee`
+  # exactly, in both directions: keeping less than it charges is a hop working
+  # for free, keeping more is a hop eroding what it passes on.
+  sender:
+    image: connector-rust:local
+    profiles: [sender]
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        # The five figures this rehearsal is written around, and the arithmetic
+        # that relates them (ADR 0028, ADR 0010, issue #1144):
+        #
+        #   AMOUNT = FEE + PRICE -- the path's COST (`CONTEXT.md`): A's fee for
+        #     carrying the packet plus the price of the route B terminates. It
+        #     is also exactly A's own client-edge `price`, which is ADR 0028's
+        #     intended `amount == price`.
+        #   PRICE  -- B's committed price, and therefore the whole of what A
+        #     forwards, so the coverage gate has no slack.
+        #   FEE    -- A's committed fee, and what A must be left holding: the
+        #     difference between what it collected and what it forwarded is
+        #     ADR 0010's earnings rule, measured below rather than assumed.
+        AMOUNT=1100
+        PRICE=1000
+        FEE=100
+        CROSSINGS=2
+        CHANNEL=0x57c5462d40a3c60fa89b8fe4f3f24cf560947a413df9a691499e58abea1d63f8
+        JOURNAL=/app/payee-state/peer-claims.log
+        send() {
+          /usr/local/bin/connector send \
+            --operator     http://connector-a:3000 \
+            --operator-key /app/data/operator-send.key \
+            --to           g.local.two-hop.b.app \
+            --seal-to      http://connector-b:3000/ilp \
+            --target       / \
+            --amount       "$$AMOUNT" \
+            --body         /app/data/payload.json \
+            --expect-fulfill
+        }
+        echo '--- crossing 1: priced at B, covered by A before it is sent'
+        send
+        echo '--- crossing 2: the covering claim must ADVANCE, not repeat'
+        send
+
+        if [ ! -f "$$JOURNAL" ]; then
+          echo "B kept no claim journal at $$JOURNAL, so nothing was ever accepted and" >&2
+          echo "both crossings were carried for free." >&2
+          exit 1
+        fi
+        echo "--- what B was actually paid, out of B's own claim journal"
+        # One line per accepted claim on this channel, in the order ClaimBook
+        # wrote them: `inbound_claim_accepted <channel> <nonce> <cumulative>
+        # <signature>`, tab separated (`connector_runtime::journal`).
+        if ! awk -F '\t' -v channel="$$CHANNEL" -v price="$$PRICE" -v crossings="$$CROSSINGS" \
+                 -v amount="$$AMOUNT" -v fee="$$FEE" '
+              $$1 == "inbound_claim_accepted" && $$2 == channel {
+                accepted = accepted + 1
+                advance = $$4 - cumulative
+                retained = amount - advance
+                printf "    claim %d: nonce %s, cumulative %s, advance %d, A retained %d\n", accepted, $$3, $$4, advance, retained
+                if (advance < price) {
+                  printf "    ^^ that advance does not cover the %d this route costs\n", price
+                  short = 1
+                }
+                # ADR 0010 stated as a measurement rather than as a
+                # restatement of the config: a hops earnings are the
+                # difference between what it collected upstream and what it
+                # sent downstream, and that difference must be its fee
+                # EXACTLY. Two figures from two places -- what the sender
+                # actually put on the wire, and what B wrote in its own
+                # journal -- so a fee silently dropped, doubled, or turned
+                # into a share of the amount all land here. Not implied by
+                # the advance check above: an advance of price + 1 satisfies
+                # that one and means A retained a unit less than it charges.
+                if (retained != fee) {
+                  printf "    ^^ A collected %d and forwarded %d, so it kept %d -- not the %d fee it charges\n", amount, advance, retained, fee
+                  earnings = 1
+                }
+                cumulative = $$4
+              }
+              END {
+                if (accepted < crossings) {
+                  printf "B accepted %d claims on this channel, but %d crossings were sent and every one of them had to be paid for\n", accepted, crossings
+                  exit 1
+                }
+                if (short || earnings) { exit 1 }
+                if (cumulative < crossings * price) {
+                  printf "the watermark on this channel stands at %d, and %d crossings at %d each is %d\n", cumulative, crossings, price, crossings * price
+                  exit 1
+                }
+                printf "    watermark %d = %d crossings x %d, and A kept %d x %d = %d of the %d it collected\n", cumulative, crossings, price, crossings, fee, crossings * fee, crossings * amount
+              }
+            ' "$$JOURNAL"; then
+          echo 'the priced peer termination was NOT paid for -- see the claim lines above.' >&2
+          echo '--- B/peer-claims.log follows ---' >&2
+          cat "$$JOURNAL" >&2
+          exit 1
+        fi
+        echo "--- the peering paid B for every crossing it carried"
+    volumes:
+      # A's keys: the sender signs the operator write with A's allowlisted key
+      # and posts the fixture body from the same directory.
+      - ./local/.keys/two-hop/connector-a:/app/data:ro
+      # B's state volume, READ-ONLY, purely to read the claim journal. The
+      # sender runs as the same uid 10001 that wrote it.
+      - two-hop-b-state:/app/payee-state:ro
+
+volumes:
+  two-hop-a-state:
+  two-hop-b-state:

@@ -21,6 +21,7 @@ connector-peer-auth = { path = "../connector-peer-auth" }
 # `lib.rs` for why a shared crate is not carved out yet.
 connector-peer-btp = { path = "../connector-peer-btp" }
 connector-runtime = { path = "../connector-runtime" }
+arc-swap = "1.9.2"
 async-trait = "0.1"
 # Base64 is a header artifact and nothing else (§1.4, §4): the claim, the
 # claim ack and the credential are the same JSON both carriages carry.

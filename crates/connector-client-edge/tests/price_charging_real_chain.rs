@@ -32,7 +32,9 @@ use connector_config::StaticRoute;
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
 };
-use connector_runtime::{AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock};
+use connector_runtime::{
+    AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock, PAYER_HEADER,
+};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
 use connector_signer::giftwrap::{derive_fulfillment, seal_request};
@@ -99,8 +101,22 @@ fn counterparty_secret() -> SecretKey {
     SecretKey::parse(&[11u8; 32]).expect("valid secret key")
 }
 
+/// A **second** payer, for the second channel this file opens. Since ADR
+/// 0059 (issue #1158) a channel id is derived from its participant pair, so
+/// this node has at most one live channel with any one counterparty and a
+/// second `openChannel` for the same pair reverts `ChannelAlreadyExists`.
+/// Two concurrently live channels therefore means two payers -- which is
+/// what a real deployment looks like anyway.
+fn second_counterparty_secret() -> SecretKey {
+    SecretKey::parse(&[12u8; 32]).expect("valid secret key")
+}
+
+fn address_of(secret: &SecretKey) -> [u8; 20] {
+    derive_evm_address(&PublicKey::from_secret_key(secret).serialize())
+}
+
 fn counterparty_address() -> [u8; 20] {
-    derive_evm_address(&PublicKey::from_secret_key(&counterparty_secret()).serialize())
+    address_of(&counterparty_secret())
 }
 
 /// An EVM claim JSON with a genuine EIP-712 signature over its own fields
@@ -108,7 +124,24 @@ fn counterparty_address() -> [u8; 20] {
 /// (issue #558) -- a forged or unsigned claim would be refused before ever
 /// reaching the price check this file exists to prove.
 fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) -> String {
+    evm_claim_json_signed_by(
+        &counterparty_secret(),
+        channel_id_hex,
+        nonce,
+        transferred_amount,
+    )
+}
+
+/// [`evm_claim_json`] from a named payer -- the second channel's own
+/// counterparty rather than the first's.
+fn evm_claim_json_signed_by(
+    secret: &SecretKey,
+    channel_id_hex: &str,
+    nonce: u64,
+    transferred_amount: u128,
+) -> String {
     evm_claim_json_under(
+        secret,
         channel_id_hex,
         nonce,
         transferred_amount,
@@ -122,14 +155,14 @@ fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) ->
 /// the resolution reports the real deployment's own `chainId` and
 /// `verifyingContract` rather than this file's synthetic pair.
 fn evm_claim_json_under(
+    secret: &SecretKey,
     channel_id_hex: &str,
     nonce: u64,
     transferred_amount: u128,
     chain_id: u64,
     token_network: [u8; 20],
 ) -> String {
-    let secret = counterparty_secret();
-    let address = counterparty_address();
+    let address = address_of(secret);
 
     let mut channel_id = [0u8; 32];
     channel_id.copy_from_slice(
@@ -144,7 +177,7 @@ fn evm_claim_json_under(
         chain_id,
         token_network_address: token_network,
     };
-    let signature = sign_evm(&secret, &evm_balance_proof_digest(&proof));
+    let signature = sign_evm(secret, &evm_balance_proof_digest(&proof));
 
     format!(
         r#"{{
@@ -291,33 +324,44 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
         .expect("deploy a TokenNetwork through a fresh registry");
 
     // A channel genuinely opened and funded with real (anvil-minted mock
-    // USDC) value -- `deposited` below is read back from the chain's own
-    // receipt, never a number this test invents. The counterparty must be
-    // a real 20-byte EVM address (issue #576): `TokenNetwork` requires one
-    // able to sign balance proofs, not an arbitrary peer name.
+    // USDC) value -- `counterparty_deposited` below is read back from the
+    // chain's own receipt, never a number this test invents. The
+    // counterparty must be a real 20-byte EVM address (issue #576):
+    // `TokenNetwork` requires one able to sign balance proofs, not an
+    // arbitrary peer name.
+    //
+    // It is the *counterparty's* side that is funded here, and only that
+    // side: a claim this node redeems is drawn from the payer's
+    // collateral, never the node's own. `fund_counterparty` is the
+    // fixture-only delegate deposit standing in for the payer's own
+    // wallet (issue #1118) -- `fund` itself would credit the node's side
+    // and buy nothing.
     let counterparty = counterparty_address().to_vec();
     let paid_channel = backend
         .open(counterparty.clone(), Duration::hours(1))
         .await
         .expect("open a real channel");
     let paid_state = backend
-        .fund(&paid_channel, 1_000)
+        .fund_counterparty(&paid_channel, 1_000)
         .await
         .expect("fund the channel with real ERC-20 value");
     assert_eq!(
-        paid_state.deposited, 1_000,
+        paid_state.counterparty_deposited, 1_000,
         "a real transaction genuinely moved this value on chain"
     );
 
+    // A second channel, to a SECOND payer: one live channel per pair since
+    // ADR 0059, so reusing `counterparty` here would revert on chain.
+    let underpaid_counterparty = address_of(&second_counterparty_secret()).to_vec();
     let underpaid_channel = backend
-        .open(counterparty, Duration::hours(1))
+        .open(underpaid_counterparty, Duration::hours(1))
         .await
-        .expect("open a second real channel");
+        .expect("open a second real channel, to a second payer");
     let underpaid_state = backend
-        .fund(&underpaid_channel, 40)
+        .fund_counterparty(&underpaid_channel, 40)
         .await
         .expect("fund the second channel with real ERC-20 value, less than the route's price");
-    assert_eq!(underpaid_state.deposited, 40);
+    assert_eq!(underpaid_state.counterparty_deposited, 40);
 
     let route = StaticRoute::new_priced("g.example.app", HANDLER_URL, 100).unwrap();
 
@@ -329,13 +373,38 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let (status, bytes) = post_claim(
         connector,
         signer,
-        &evm_claim_json(&paid_channel.0, 1, paid_state.deposited),
+        &evm_claim_json(&paid_channel.0, 1, paid_state.counterparty_deposited),
         channels_recording(&paid_channel.0, &paid_state.counterparty),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     Fulfill::decode(&bytes).expect("a claim covering the real on-chain deposit is fulfilled");
     assert_eq!(app_client.deliveries().len(), 1);
+
+    // ADR 0040 (issue #994), joined to a real chain: the payer the app is
+    // told about is the channel this claim was actually *verified*
+    // against, not anything the sender wrote. Asserted here rather than
+    // only in `connector-runtime`'s own unit tests because this is the
+    // whole path -- a real signature, checked against a real on-chain
+    // channel, whose key then rides the delivery.
+    let delivery = app_client.deliveries().remove(0);
+    let payer = delivery
+        .request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(PAYER_HEADER))
+        .map(|(_, value)| value.clone());
+    assert_eq!(
+        payer.as_deref(),
+        Some(
+            format!(
+                "evm:0x{}",
+                paid_channel.0.trim_start_matches("0x").to_ascii_lowercase()
+            )
+            .as_str()
+        ),
+        "the app is told which channel paid for this delivery"
+    );
 
     // A second, freshly funded channel that genuinely received only 40 --
     // less than the route's price of 100 -- is refused as underpayment
@@ -347,7 +416,12 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let (status_two, bytes_two) = post_claim(
         connector_two,
         signer_two,
-        &evm_claim_json(&underpaid_channel.0, 1, underpaid_state.deposited),
+        &evm_claim_json_signed_by(
+            &second_counterparty_secret(),
+            &underpaid_channel.0,
+            1,
+            underpaid_state.counterparty_deposited,
+        ),
         channels_recording(&underpaid_channel.0, &underpaid_state.counterparty),
     )
     .await;
@@ -393,10 +467,10 @@ async fn a_claim_above_the_real_on_chain_deposit_is_refused_until_a_real_deposit
         .await
         .expect("open a real channel");
     let state = backend
-        .fund(&channel, 1_000)
+        .fund_counterparty(&channel, 1_000)
         .await
         .expect("fund the channel with real ERC-20 value");
-    assert_eq!(state.deposited, 1_000);
+    assert_eq!(state.counterparty_deposited, 1_000);
 
     // The claim is signed under the chain's *own* EIP-712 domain, since
     // that is what the resolution reports -- a synthetic domain would fail
@@ -419,7 +493,14 @@ async fn a_claim_above_the_real_on_chain_deposit_is_refused_until_a_real_deposit
     // One base unit above what the chain holds: fresh, well-formed,
     // correctly signed, and covering the route's price of 100 -- refused
     // purely because it could never be redeemed.
-    let over = evm_claim_json_under(&channel.0, 1, 1_001, chain_id, token_network);
+    let over = evm_claim_json_under(
+        &counterparty_secret(),
+        &channel.0,
+        1,
+        1_001,
+        chain_id,
+        token_network,
+    );
     let (status, bytes) = post_claim_to(app.clone(), signer.clone(), &over).await;
     assert_eq!(status, StatusCode::OK);
     let reject = Reject::decode(&bytes).expect("decode reject");
@@ -444,10 +525,10 @@ async fn a_claim_above_the_real_on_chain_deposit_is_refused_until_a_real_deposit
     // resubmission because the breach provokes a re-read rather than a
     // permanent refusal.
     let topped_up = backend
-        .fund(&channel, 1)
+        .fund_counterparty(&channel, 1)
         .await
         .expect("a real second setTotalDeposit");
-    assert_eq!(topped_up.deposited, 1_001);
+    assert_eq!(topped_up.counterparty_deposited, 1_001);
 
     // Under the policy a production node actually runs, and deliberately:
     // the re-read that notices the deposit is rate-limited per channel, so

@@ -799,6 +799,7 @@ fn process_claim_from_channel(
     // Verify Ed25519 precompile instruction at index 0
     verify_ed25519_precompile(
         instructions_sysvar,
+        program_id,
         claimer.key,
         channel_pda_info.key,
         nonce,
@@ -828,8 +829,14 @@ fn process_claim_from_channel(
 
 /// Verify that the Ed25519 precompile instruction at index 0 contains a valid
 /// signature verification for the expected balance proof message.
+/// The domain tag every balance-proof message begins with (ADR 0053, issue
+/// #1082). Must stay byte-identical to
+/// `connector_signer::SOLANA_BALANCE_PROOF_DOMAIN_TAG`.
+const BALANCE_PROOF_DOMAIN_TAG: &[u8; 16] = b"TOON-BALPROOF-V2";
+
 fn verify_ed25519_precompile(
     instructions_sysvar: &AccountInfo,
+    program_id: &Pubkey,
     claimer: &Pubkey,
     channel_pda: &Pubkey,
     nonce: u64,
@@ -897,15 +904,33 @@ fn verify_ed25519_precompile(
     }
     let message_bytes = &ix_data[message_data_offset..message_end];
 
-    // Build expected balance proof: channel_pda (32) || nonce (8 LE) || transferred_amount (8 LE)
-    // Uses a fixed-size array to avoid heap allocation in the BPF runtime.
-    let mut expected_message = [0u8; 48];
-    expected_message[0..32].copy_from_slice(channel_pda.as_ref());
-    expected_message[32..40].copy_from_slice(&nonce.to_le_bytes());
-    expected_message[40..48].copy_from_slice(&transferred_amount.to_le_bytes());
+    // Build the expected balance proof (ADR 0053, issue #1082):
+    //   domain tag (16) || program_id (32) || channel_pda (32)
+    //     || nonce (8 LE) || transferred_amount (8 LE)
+    //
+    // The program id is in the signed bytes so that a signature is valid only
+    // against THIS deployment. Before #1082 the message was 48 bytes and bound
+    // nothing about which chain the channel lived on, so a signature was valid
+    // for its channel account on any cluster where that account existed -- the
+    // separation came from program ids happening to differ between deployments
+    // rather than from the signature.
+    //
+    // A cluster string cannot go in here: a program knows its own id and
+    // nothing about which cluster it runs on, so it could not rebuild the
+    // message to compare against. The cluster is checked off chain instead.
+    //
+    // Fixed-size array to avoid a heap allocation in the BPF runtime.
+    let mut expected_message = [0u8; 96];
+    expected_message[0..16].copy_from_slice(BALANCE_PROOF_DOMAIN_TAG);
+    expected_message[16..48].copy_from_slice(program_id.as_ref());
+    expected_message[48..80].copy_from_slice(channel_pda.as_ref());
+    expected_message[80..88].copy_from_slice(&nonce.to_le_bytes());
+    expected_message[88..96].copy_from_slice(&transferred_amount.to_le_bytes());
 
-    // Verify message matches expected balance proof
-    if message_bytes.len() != 48 || message_bytes != &expected_message[..] {
+    // Verify message matches expected balance proof. A 48-byte message -- the
+    // pre-#1082 layout -- fails on length here rather than being read as a
+    // truncated prefix of this one.
+    if message_bytes.len() != 96 || message_bytes != &expected_message[..] {
         return Err(PaymentChannelError::InvalidSignature.into());
     }
 

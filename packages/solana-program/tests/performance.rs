@@ -242,11 +242,14 @@ fn build_claim_instruction(
 }
 
 fn build_balance_proof_message(
+    program_id: &Pubkey,
     channel_pda: &Pubkey,
     nonce: u64,
     transferred_amount: u64,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(48);
+    let mut msg = Vec::with_capacity(96);
+    msg.extend_from_slice(b"TOON-BALPROOF-V2");
+    msg.extend_from_slice(program_id.as_ref());
     msg.extend_from_slice(channel_pda.as_ref());
     msg.extend_from_slice(&nonce.to_le_bytes());
     msg.extend_from_slice(&transferred_amount.to_le_bytes());
@@ -376,7 +379,7 @@ async fn test_claim_from_channel_cu_under_budget() {
     .await;
 
     // Build the claim transaction for simulation
-    let message = build_balance_proof_message(&channel_pda, 1, 5000);
+    let message = build_balance_proof_message(&PROGRAM_ID, &channel_pda, 1, 5000);
     let dalek_keypair = to_dalek_keypair(&participant_a);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
     let claim_ix = build_claim_instruction(
