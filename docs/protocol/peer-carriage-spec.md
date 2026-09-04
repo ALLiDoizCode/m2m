@@ -726,6 +726,33 @@ additively extensible) and MUST NOT be emitted.
   includes a **leased** route: `Connector::client_route` excludes leases by construction (ADR 0028),
   so neither rule here reaches one. That is ADR 0028's own gap, unchanged by ADR 0042.
 
+  **Neither rule reaches a peering established at runtime, because on the accepting side there is
+  no peering** ([ADR 0058](../adr/0058-a-peering-is-established-from-a-url.md), whose dial half §2.1
+  already carries). `POST /peers` is one operator's own write on one node: it derives the channel,
+  binds it into that node's `ClaimBook` and registers the outbound client hop that pays over it
+  (`Connector::bind_runtime_peer_channel`, `Connector::register_outbound_client_hop`), and it puts
+  nothing into the counterparty's configuration -- ADR 0058 makes a peering establishable **from** a
+  URL, not **on** somebody else's node. Role there is still §1.2's P2 and P3, and P2 reads
+  `[[peer_channels]]`: `PeerAuthPolicy::from_config` is built once from the loaded config and no
+  runtime write mutates it, so a claim naming a runtime-derived channel binds no peering and the
+  arrival is a **client** arrival. On a node whose own config declares no `[[peers]]` row at all,
+  no peer handling is even mounted (`PeerCarriages::from_config` answers `None`), whatever
+  `peer_expose` says. This is §1.2's "Peer role is not a prerequisite for paid carriage" reached
+  from the other direction: the payer is paying an ordinary client edge, which is the shape the
+  runtime peering was built to work in.
+
+  **So over a runtime peering the refusal is the client edge's, and it is not `F06`.** An arrival
+  carrying no claim is greeted with the x402 terms of `client-edge-spec.md` §1.4 -- the same
+  `connector_domain::x402::terms_body` emitter, carrying this node's identity and settlement facts
+  where the peer greeting above quotes the figure alone. An arrival whose claim **under-covers** the
+  route's price is `F03` (Invalid Amount) with that price in `accumulatedCost`, not `F06` with a
+  greeting attached (`ClaimIngestRejection::Underpayment`, `client-edge-spec.md` §1.3). Both
+  differences are the client edge's own taxonomy, and neither is a hole in §0.1's one pipeline or a
+  drift under I7: the two peer carriages still answer this rule identically, and what changed is
+  which **edge** the packet arrived at, not which wire it rode. An operator who wants §3.1's rule to
+  govern what a counterparty sends writes `[[peers]]` and `[[peer_channels]]` on the **accepting**
+  side; there is no runtime write on the payer's node that can put them there.
+
 ### 3.2 The `WireClaim` binary encoding is not used on either carriage
 
 `connector_runtime::WireClaim::encode`'s length-prefixed binary form was the deleted peer semantics's ad
