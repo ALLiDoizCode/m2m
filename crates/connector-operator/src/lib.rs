@@ -1403,16 +1403,9 @@ mod tests {
     mod write_authentication {
         use super::*;
         use crate::rfc9421::{keyid_hex, sign_request};
-        use connector_domain::{derive_condition, RejectCode};
+        use connector_domain::RejectCode;
         use ed25519_dalek::Keypair;
         use rand::rngs::OsRng;
-
-        // An arbitrary preimage, used only to derive a well-formed,
-        // non-all-zero execution condition -- `reject_ineligible` (issue
-        // #417) rejects an all-zero condition before routing is ever
-        // reached, so these tests need a real one to exercise routing at
-        // all.
-        const FULFILLMENT: [u8; 32] = [7u8; 32];
 
         fn keypair() -> Keypair {
             Keypair::generate(&mut OsRng)
@@ -1422,7 +1415,7 @@ mod tests {
             Prepare {
                 amount: 0,
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(1),
-                execution_condition: derive_condition(&FULFILLMENT),
+                greeting: false,
                 destination: "g.example.nowhere".to_string(),
                 data: b"originated by the operator".to_vec(),
             }
@@ -2031,7 +2024,7 @@ mod tests {
         /// use to prove selection without standing up a second connector.
         #[tokio::test]
         async fn a_leased_route_created_over_the_operator_surface_is_used_for_routing() {
-            use connector_domain::{derive_condition, RejectCode};
+            use connector_domain::RejectCode;
 
             let clock = Arc::new(TestClock::new(chrono::Utc::now()));
             let keypair = keypair();
@@ -2059,7 +2052,7 @@ mod tests {
             let prepare = Prepare {
                 amount: 0,
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(1),
-                execution_condition: derive_condition(&[7u8; 32]),
+                greeting: false,
                 destination: "g.example.leased".to_string(),
                 data: b"routed over a freshly created lease".to_vec(),
             };

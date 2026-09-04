@@ -7,7 +7,8 @@
 //! flat per-packet fee arithmetic (ADR 0010),
 //! what a terminated route charges for one packet -- a schedule over the
 //! packet's payload length, flat when its slope is zero (ADR 0065, [`price`]) --
-//! execution condition / fulfilment / expiry rules (RFC-0022, issue #417),
+//! fulfilment / expiry rules (RFC-0022; the execution condition itself left
+//! the wire under issue #1269 / ADR 0069),
 //! claim nonce / watermark rules (ADR 0004, ADR 0005, issue #423), and the
 //! structured envelope a packet carries to and from the app behind a
 //! terminated route (ADR 0018, issue #519). Also the x402 `payment-required`
@@ -36,8 +37,8 @@ pub mod x402;
 pub use address::is_valid_ilp_address;
 pub use claim::{advance_watermark, validate_claim, validate_price, ClaimError, Watermark};
 pub use condition::{
-    condition_is_present, delivery_budget, derive_condition, forwarded_expiry,
-    fulfillment_matches_condition, is_expired, FORWARDING_MESSAGE_WINDOW,
+    delivery_budget, forwarded_expiry, fulfillment_matches_condition, is_expired,
+    FORWARDING_MESSAGE_WINDOW,
 };
 pub use envelope::{EnvelopeError, EnvelopeRequest, EnvelopeResponse};
 pub use error::PacketError;

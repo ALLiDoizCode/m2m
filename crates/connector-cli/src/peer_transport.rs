@@ -377,7 +377,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
         Prepare {
             amount: 100,
             expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
-            execution_condition: [0u8; 32],
+            greeting: false,
             destination: destination.to_string(),
             data: Vec::new(),
         }

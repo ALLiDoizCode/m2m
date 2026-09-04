@@ -62,12 +62,11 @@
 //!     asserts the two identities actually differ, so a probe pointed at one
 //!     URL twice fails loudly instead of proving nothing.
 //!
-//!   * **The execution condition is not free.** It must be
-//!     `sha256(HKDF-SHA256(shared_secret, salt = zeros(32),
-//!     info = "toon-giftwrap-fulfillment", 32))` -- the terminating node
-//!     derives its fulfilment from the same shared secret, so a random
-//!     condition can never be matched. Here that is
-//!     `derive_condition(&derive_fulfillment(&secret))`, from the workspace's
+//!   * **There is no execution condition to get right, or wrong (issue
+//!     #1269 / ADR 0069).** The PREPARE carries none; the terminating node
+//!     derives its fulfilment straight from the shared secret the gift wrap
+//!     carries, and this probe's own end-to-end check compares the FULFILL
+//!     it gets back against `derive_fulfillment(&secret)` -- the workspace's
 //!     own signer, so there is no second implementation to drift.
 //!
 //!   * **The PREPARE encoding is not stock ILPv4.** The amount is an OER
@@ -126,9 +125,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
-use connector_domain::{
-    derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Price, Reject,
-};
+use connector_domain::{EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Price, Reject};
 use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof, LocalSigner,
@@ -355,8 +352,9 @@ fn store_job_body(event: &serde_json::Value) -> Vec<u8> {
 // ── the packet ───────────────────────────────────────────────────────────────
 
 /// A `Prepare` a real sender forms: an OER `EnvelopeRequest` gift-wrapped to
-/// the TERMINATING connector's identity (ADR 0018), under a condition minted
-/// from the fulfilment that same wrap's shared secret derives (ADR 0019).
+/// the TERMINATING connector's identity (ADR 0018), which derives its
+/// fulfilment from that same wrap's shared secret (ADR 0019) -- there is no
+/// execution condition to mint any more (ADR 0069).
 ///
 /// `identity` is deliberately a parameter rather than something this function
 /// fetches: the ONE thing a forwarded packet gets wrong is sealing to the hop
@@ -387,7 +385,7 @@ fn sealed_prepare(
             // Generous, because this packet crosses a peering and an Arweave
             // upload before it can be answered.
             expires_at: Utc::now() + ChronoDuration::minutes(2),
-            execution_condition: derive_condition(&derive_fulfillment(&shared_secret)),
+            greeting: false,
             destination: destination.to_string(),
             data,
         },

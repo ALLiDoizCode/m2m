@@ -740,7 +740,7 @@ mod tests {
             .handle_prepare(connector_domain::Prepare {
                 amount: 100,
                 expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
-                execution_condition: [0u8; 32],
+                greeting: false,
                 destination: "g.nowhere".to_string(),
                 data: Vec::new(),
             })

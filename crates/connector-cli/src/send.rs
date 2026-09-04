@@ -4,11 +4,18 @@
 //! operator router "originates a packet outward, exactly as the client edge
 //! does for an external caller" (ADR 0008). What it could not do was *form*
 //! one. The body of that request is an OER-encoded `Prepare` whose payload is
-//! gift-wrapped to the terminating connector's identity (ADR 0018) under a
-//! condition minted from the fulfilment that wrap's shared secret derives
-//! (ADR 0019), and the request itself carries an RFC 9421 signature from a key
-//! on the node's `[operator] write_keys` allowlist. Assembling all of that by
-//! hand is why nobody drove a node this way.
+//! gift-wrapped to the terminating connector's identity (ADR 0018), and the
+//! request itself carries an RFC 9421 signature from a key on the node's
+//! `[operator] write_keys` allowlist. Assembling all of that by hand is why
+//! nobody drove a node this way.
+//!
+//! The `Prepare` carries no execution condition (issue #1269 / ADR 0069):
+//! this is where the sender's own end-to-end check lives instead. [`send`]
+//! compares the returned FULFILL's fulfilment against
+//! `derive_fulfillment(&shared_secret)` -- the same derivation the
+//! terminating connector uses (ADR 0019) -- and reports
+//! [`Outcome::FulfilledWithWrongFulfillment`] rather than trusting a hop's
+//! word that the packet was genuinely delivered.
 //!
 //! This is the missing half, and it is deliberately the *same* half a test
 //! would have written privately: one implementation, in the shipped binary,
@@ -37,9 +44,7 @@
 use std::path::Path;
 
 use chrono::{Duration, Utc};
-use connector_domain::{
-    derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
-};
+use connector_domain::{EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject};
 use connector_operator::signing::{keyid_hex, sign_request};
 use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
 use connector_signer::PublicKeyBytes;
@@ -297,7 +302,7 @@ pub async fn send(options: &SendOptions) -> Result<SendOutcome, SendError> {
     let prepare = Prepare {
         amount: options.amount,
         expires_at: Utc::now() + Duration::seconds(options.expires_in_seconds),
-        execution_condition: derive_condition(&derive_fulfillment(&shared_secret)),
+        greeting: false,
         destination: options.destination.clone(),
         data,
     };
