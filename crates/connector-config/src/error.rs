@@ -290,7 +290,9 @@ pub enum ConfigError {
          carriage: 'wss://' selects BTP and 'https://' selects ILP-over-HTTP, and there is no \
          third one (ADR 0027 deleted the raw-TCP transport). Both are TLS-only because a \
          peering carries signed balance proofs (ADR 0004), so 'ws://' and 'http://' are not \
-         accepted either; see docs/operators/btp-peer-transport-bringup.md"
+         accepted either -- except at a host ending in '.onion', which authenticates the \
+         circuit with its own key and needs no certificate (ADR 0070), and this host is not \
+         one; see docs/operators/btp-peer-transport-bringup.md"
     )]
     PeerEndpointScheme {
         id: String,
@@ -1111,6 +1113,50 @@ pub enum ConfigError {
          it used to carry is gone"
     )]
     AnnounceSectionRenamed,
+
+    /// The one `socks_proxy` value is not a URL at all (ADR 0070 decision 3).
+    ///
+    /// Carries the text as written, because the usual cause is a bare
+    /// `host:port` with no scheme -- which is exactly the shape every other
+    /// SOCKS-taking tool accepts -- and an operator reading the message has
+    /// to see that the scheme is what is missing.
+    #[error("socks_proxy '{value}' is not a URL: {source}")]
+    SocksProxyInvalidUrl {
+        value: String,
+        #[source]
+        source: url::ParseError,
+    },
+
+    /// The `socks_proxy` URL names no host (ADR 0070 decision 3) --
+    /// `socks5h://` on its own, or a `socks5h:9050` that looks like a
+    /// `host:port` and is not one. `socks5h` is not a *special* scheme in
+    /// the URL standard, so unlike `https://` it parses happily with an
+    /// empty host; without this check such a value would load, the node
+    /// would come up clean, and every onion dial would then fail on a proxy
+    /// address that is not an address. A loaded `Config` needs no further
+    /// validation anywhere downstream (ADR 0009), and that includes this.
+    #[error(
+        "socks_proxy '{value}' names no host to reach the proxy at -- write it as \
+         'socks5h://<host>:<port>', e.g. 'socks5h://127.0.0.1:9050'. ('socks5h' is not a \
+         special URL scheme, so a missing host parses rather than failing, which is why this \
+         is checked by name)"
+    )]
+    SocksProxyNoHost { value: String },
+
+    /// The `socks_proxy` URL names a scheme other than `socks5h` (ADR 0070
+    /// decision 3) -- in practice `socks5`, which every SOCKS-taking tool
+    /// spells that way and which is wrong here for a reason no operator can
+    /// be expected to already know. Hence the length of the message: the
+    /// `h` is the whole point of the key.
+    #[error(
+        "socks_proxy '{value}' has scheme '{scheme}', but it must be 'socks5h'. The 'h' is not \
+         a preference: a 'socks5://' proxy resolves the hostname LOCALLY and dials the address \
+         it gets back, and no local resolver can resolve a '.onion' name -- so a node that \
+         started with one would come up clean and then fail every onion peering at dial time, \
+         for a reason nothing in its log explains. Resolution has to happen AT the proxy, which \
+         is what 'socks5h://' asks for (ADR 0070)"
+    )]
+    SocksProxyScheme { value: String, scheme: String },
 
     /// The removed-section trap for purchasable peering (ADR 0043), the
     /// same shape [`ConfigError::PeerWireAddrRemoved`] and

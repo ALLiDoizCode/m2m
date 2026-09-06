@@ -108,10 +108,13 @@ impl PeerCarriage {
     /// laptop-runnable end-to-end test can point one connector at another's
     /// loopback socket without a TLS terminator in the harness; it is not
     /// a deployment shape.
-    /// Public because a peering established at runtime from a URL (ADR
-    /// 0058) decides its carriage by exactly this rule and must not grow
-    /// a second copy of it: §2.1 is one sentence, and two implementations
-    /// of one sentence is how a `wss://` peering ends up dialed over HTTP.
+    ///
+    /// **This is the scheme half of §2.1 and not the whole of it.** A
+    /// caller holding a URL wants [`PeerCarriage::for_endpoint`], which is
+    /// this function plus ADR 0070's host rule; this one is left public
+    /// because the meaning and the scope of `peer_allow_plaintext_endpoints`
+    /// are asserted directly against it, and a rule nothing can name is a
+    /// rule nothing can hold still.
     pub fn from_scheme_allowing_plaintext(
         scheme: &str,
         allow_plaintext: bool,
@@ -126,6 +129,99 @@ impl PeerCarriage {
             None => None,
         }
     }
+
+    /// **The** §2.1 resolver: which carriage this connector dials `url` on,
+    /// or `None` for a URL whose scheme selects nothing this node dials.
+    ///
+    /// Two rules, in one place. The scheme selects the carriage
+    /// ([`PeerCarriage::from_scheme_allowing_plaintext`]), and -- ADR 0070
+    /// decision 2 -- a host ending in `.onion` permits the plaintext
+    /// schemes on its own, independently of
+    /// `peer_allow_plaintext_endpoints`.
+    ///
+    /// The onion exemption is narrow because of what a v3 onion address
+    /// **is**: a base32 encoding of the ed25519 public key the circuit is
+    /// encrypted and authenticated to, so a client that reached
+    /// `abc...xyz.onion` reached the holder of that key or reached nothing.
+    /// ADR 0004's requirement that a peering's wire be authenticated is
+    /// therefore *satisfied by a different mechanism* rather than waived --
+    /// which is why the exemption keys on the `.onion` suffix and on
+    /// nothing else, and why it does not widen
+    /// `peer_allow_plaintext_endpoints`, whose own doc comment above still
+    /// describes a test affordance and not a deployment shape.
+    ///
+    /// Public, and the only thing any call site may call, because §2.1 is
+    /// one sentence: two implementations of one sentence is how a `wss://`
+    /// peering ends up dialed over HTTP, and how an onion peering ends up
+    /// dialed by a config-file peer and refused by a runtime one. The call
+    /// sites are the config-file peer resolution below,
+    /// [`crate::PeerCarriage`]'s runtime twin in `connector-runtime`'s
+    /// `RuntimePeering::dial`, the self-description read that picks a
+    /// dialable published endpoint (ADR 0058), and the registrar that gives
+    /// a runtime peering its carriage.
+    #[must_use]
+    pub fn for_endpoint(url: &Url, allow_plaintext: bool) -> Option<PeerCarriage> {
+        PeerCarriage::from_scheme_allowing_plaintext(
+            url.scheme(),
+            plaintext_permitted(url, allow_plaintext),
+        )
+    }
+}
+
+/// The host suffix that makes an endpoint an **onion endpoint** (ADR 0070).
+///
+/// A `.onion` name is a host, not a scheme and not a carriage: `http://` at
+/// one is still ILP-over-HTTP and `ws://` at one is still BTP. Written once
+/// so the suffix that decides a carriage and the suffix that decides a
+/// SOCKS5 dial are the same characters.
+const ONION_SUFFIX: &str = ".onion";
+
+/// Whether `url` is an **onion endpoint** -- a URL whose host ends in
+/// `.onion` (ADR 0070).
+///
+/// The one implementation of that question, for both of the things it
+/// decides: whether a plaintext scheme selects a carriage
+/// ([`PeerCarriage::for_endpoint`]) and whether a dial goes through the
+/// configured SOCKS5 proxy rather than direct. A second copy is how a node
+/// ends up loading a peering it will not dial, or dialing one it should
+/// have refused.
+///
+/// Case-insensitive, because a host is: `Url` already lowercases the host
+/// of a special scheme, and the explicit fold here is so a caller reading
+/// this function does not have to know that. `None` host -- which no
+/// `http`/`https`/`ws`/`wss` URL has, since all four are special schemes
+/// and never parse without one -- is not an onion endpoint.
+#[must_use]
+pub fn is_onion_endpoint(url: &Url) -> bool {
+    url.host_str()
+        .is_some_and(|host| host.to_ascii_lowercase().ends_with(ONION_SUFFIX))
+}
+
+/// Whether a **plaintext** scheme is acceptable at `url`: the one sentence
+/// every surface that reads an operator-supplied URL has to agree on.
+///
+/// Two ways to be acceptable, and they are independent. `allow_plaintext`
+/// is the node-wide `peer_allow_plaintext_endpoints` opt-in (issue #678,
+/// gap 3) -- a laptop-harness affordance, not a deployment shape. The other
+/// is ADR 0070 decision 2: a `.onion` host permits the plaintext schemes on
+/// its own, because the address *is* the ed25519 key the circuit is
+/// authenticated to, so ADR 0004's requirement is satisfied by a different
+/// mechanism rather than waived.
+///
+/// **Named, and called from every surface, because writing it out is how it
+/// gets written out wrong.** It governs four things that must not disagree
+/// about one URL: which carriage a peer endpoint selects
+/// ([`PeerCarriage::for_endpoint`]), whether a `[[pay_channels]]` row's
+/// `client_edge_url` loads, whether the self-description a runtime peering
+/// is established from may be read (ADR 0058), and -- through
+/// [`is_onion_endpoint`] -- which socket the dial then leaves on. The
+/// version of this sentence that omits its second clause is still a
+/// plausible-looking `match` arm, and it produces a node that loads an
+/// onion peering it can never cover and can never be peered with at
+/// runtime.
+#[must_use]
+pub fn plaintext_permitted(url: &Url, allow_plaintext: bool) -> bool {
+    allow_plaintext || is_onion_endpoint(url)
 }
 
 impl fmt::Display for PeerCarriage {
@@ -549,12 +645,13 @@ pub(crate) fn resolve_peers(
                         source,
                     })?;
                 let carriage =
-                    PeerCarriage::from_scheme_allowing_plaintext(url.scheme(), allow_plaintext)
-                        .ok_or_else(|| ConfigError::PeerEndpointScheme {
+                    PeerCarriage::for_endpoint(&url, allow_plaintext).ok_or_else(|| {
+                        ConfigError::PeerEndpointScheme {
                             id: peer.id.clone(),
                             value: value.clone(),
                             scheme: url.scheme().to_string(),
-                        })?;
+                        }
+                    })?;
                 // No host check is needed: `wss` and `https` are both
                 // *special* schemes in the URL standard, so a URL without
                 // a host never parses in the first place and comes back

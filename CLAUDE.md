@@ -103,12 +103,19 @@ PRs touching the crates, the Dockerfile, the compose files, the contracts or
 `local/` itself — the path filter is there because a docs-only change elsewhere
 cannot break it and the image build is the expensive part.
 
-There are three topologies, chosen with `LOCAL_TOPOLOGY` (default `solo`), and CI
-runs all three: `solo` (one node, both settlement backends live at once),
+There are four topologies, chosen with `LOCAL_TOPOLOGY` (default `solo`), and CI
+runs three of them: `solo` (one node, both settlement backends live at once),
 `two-hop` (two nodes peered over ILP-over-HTTP on anvil) and `mixed-chain` (three
 nodes, EVM on one leg and Solana on the other, with the middle node holding both
-backends). The peered two do not stop at delivery — they cross the peering more
-than once and then read the payee's own claim journal, because a peer claim's
+backends). The fourth is `onion` (ADR 0070): two nodes, each with a real `anon`
+sidecar, on separate docker networks with **no route between them**, so that a
+fulfilled packet is evidence of a circuit rather than of a docker network. It is
+deliberately **off** the CI gate and must stay off it — a gate that goes red when
+a third-party anonymity network has a bad day is this repository's run-or-fail-loudly
+rule inverted rather than honoured — so run it by hand with
+`make local-verify LOCAL_TOPOLOGY=onion`. The peered three do not stop at
+delivery — they cross the peering more than once and then read the payee's own
+claim journal, because a peer claim's
 verdict rides back in `Toon-Claim-Ack` and never gates the packet, so
 `--expect-fulfill` alone would go green over a peering carrying traffic for free.
 `local/README.md` is the long version, and is worth reading before editing
@@ -132,6 +139,9 @@ operator tool, not a client SDK: it holds no channel and signs no claim.
 `--expect-fulfill` makes a non-fulfilled packet a non-zero exit, which is what makes
 the rehearsal a gate rather than a report. `--print-keyid` answers "what value goes
 in this node's `[operator] write_keys`" from the binary that will do the signing.
+`--socks-proxy <socks5h-url>` is how it probes an onion node: the verb loads no config
+file, so the node's `socks_proxy` key cannot reach it, and the flag applies the same
+host-selected rule to both `--operator` and `--seal-to`.
 
 ## Keys
 
@@ -273,6 +283,20 @@ Because the binary and a box's bind-mounted TOML are a matched pair in both
 directions, adding a required config key is a **breaking deploy** wherever that pair
 lives — for relay and store, that discipline is now each node repo's own to keep.
 
+An **onion endpoint** is a host, not a carriage (ADR 0070). A peer `endpoint` whose
+host ends in `.onion` selects BTP on `ws://` and ILP-over-HTTP on `http://`, needs
+**no** `peer_allow_plaintext_endpoints` (that switch keeps its old meaning and scope),
+and is dialed through the one root-level `socks_proxy` key — `socks5h://` only, refused
+by name otherwise, because a `socks5://` proxy resolves locally and no local resolver
+resolves a `.onion` name. Which dials take the proxy is read off the endpoint's host,
+so there is no per-peer proxy key and nothing to keep in sync. The host rule has
+**one** implementation, `connector_config::is_onion_endpoint`; do not write a second.
+`PeerCarriage` stays two-valued — ADR 0070's own falsifier is that no
+`PeerCarriage::Onion` exists. Settlement RPC and a route's `handler_url` are **not**
+proxied, on purpose (decision 4), and the operational half — the daemon's
+terms-acceptance flag, and its `HiddenServiceDir` on a persisted volume — is
+`docs/operators/onion-endpoint-bringup.md`, not the connector's.
+
 ## Pointers
 
 - `docs/architecture/source-tree.md` — the repository map: every crate, and what is
@@ -287,7 +311,7 @@ lives — for relay and store, that discipline is now each node repo's own to ke
   `cargo run -p connector-vectors --bin generate-vectors` after any change to the
   envelope, gift wrap, fulfilment derivation or claim signing.
 - `docs/operators/` — runbooks for the devnet fleet: box bring-up, key rotation, release
-  and health, peering bring-up.
+  and health, peering bring-up, onion-endpoint bring-up.
 - `docs/agents/` — issue tracker, triage labels, domain docs conventions.
 - `docs/rfcs/` — the ten Interledger RFCs this connector implements, vendored verbatim
   and pinned, each under a **TOON profile** recording where this connector departs and

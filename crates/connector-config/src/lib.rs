@@ -29,15 +29,15 @@ mod secret;
 mod settlement;
 
 pub use client_channel::{ClientChannelConfig, EvmClientChannelConfig, SolanaClientChannelConfig};
-pub use config::Config;
+pub use config::{parse_socks_proxy, Config};
 pub use error::ConfigError;
 pub use identity::ClientIdentityConfig;
 pub use node::NodeConfig;
 pub use operator::OperatorConfig;
 pub use pay_channel::{EvmPayChannelConfig, PayChannelConfig, SolanaPayChannelConfig};
 pub use peer::{
-    ForwardedClaimEnforcement, PeerCarriage, PeerConfig, PeerExposure, DEFAULT_MAX_PACKET_AMOUNT,
-    DEFAULT_PEER_TIMEOUT_MS,
+    is_onion_endpoint, plaintext_permitted, ForwardedClaimEnforcement, PeerCarriage, PeerConfig,
+    PeerExposure, DEFAULT_MAX_PACKET_AMOUNT, DEFAULT_PEER_TIMEOUT_MS,
 };
 pub use peer_channel::{EvmPeerChannelConfig, PeerChannelConfig, SolanaPeerChannelConfig};
 pub use route::{PeerRouteConfig, StaticRoute, TransportPolicy};

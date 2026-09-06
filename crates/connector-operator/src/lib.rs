@@ -2197,7 +2197,7 @@ mod tests {
                 // Loopback is `http://`, so these tests are a node that
                 // opted into plaintext peer endpoints -- the same opt-in
                 // every `local/` topology takes for the same reason.
-                .with_self_description_source(Arc::new(BoundedHttpSelfDescription::new(true)))
+                .with_self_description_source(Arc::new(BoundedHttpSelfDescription::new(true, None)))
                 .with_peer_allow_plaintext_endpoints(true),
             );
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));

@@ -12,7 +12,9 @@ use crate::identity::{resolve_client_identities, ClientIdentityConfig, RawClient
 use crate::node::{resolve_node, NodeConfig, RawNodeConfig};
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::pay_channel::{resolve_pay_channels, PayChannelConfig, RawPayChannel};
-use crate::peer::{parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, RawPeer};
+use crate::peer::{
+    is_onion_endpoint, parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, RawPeer,
+};
 use crate::peer_channel::{resolve_peer_channels, PeerChannelConfig, RawPeerChannel};
 use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
 use crate::secret::{RawSignerConfig, SecretLocation};
@@ -92,6 +94,27 @@ struct RawConfig {
     /// node.
     #[serde(default)]
     peer_allow_plaintext_endpoints: Option<bool>,
+    /// The one SOCKS5 proxy this node dials **onion** endpoints through
+    /// (ADR 0070 decision 3). Absent -- the default, and the shape of every
+    /// node that does not run an onion sidecar -- means every dial is
+    /// direct.
+    ///
+    /// The URL must be `socks5h://`, and the `h` is not a preference:
+    /// `socks5://` resolves the hostname locally before dialing, and no
+    /// local resolver resolves a `.onion` name. A node that started with
+    /// one would be a node whose onion peerings fail at dial time for a
+    /// reason nothing in its log explains, which is why the scheme is
+    /// [`ConfigError::SocksProxyScheme`] at load rather than a runtime
+    /// surprise.
+    ///
+    /// One key and one proxy: there is deliberately no per-peer `proxy =`
+    /// on `[[peers]]` and no all-outbound mode. Which dials take the proxy
+    /// is read off the endpoint's own host, so a second place to state it
+    /// would only be a second place to state it wrong. It covers the ILP
+    /// wire only -- settlement RPC and a route's `handler_url` dial direct
+    /// (ADR 0070 decision 4).
+    #[serde(default)]
+    socks_proxy: Option<String>,
     /// The peering relations this node has (issue #488; endpoint and
     /// per-relation terms, issue #677). What used to be a
     /// dialed `SocketAddr` is now an `endpoint` URL whose **scheme**
@@ -269,6 +292,7 @@ pub struct Config {
     peers: Vec<PeerConfig>,
     peer_expose: PeerExposure,
     peer_allow_plaintext_endpoints: bool,
+    socks_proxy: Option<Url>,
     peer_channels: Vec<PeerChannelConfig>,
     pay_channels: Vec<PayChannelConfig>,
     operator: Option<OperatorConfig>,
@@ -320,6 +344,7 @@ impl Config {
         let (routes, peer_routes) = resolve_routes(raw.apex.as_deref(), raw.routes, raw.children)?;
         let peer_expose = parse_peer_exposure(raw.peer_expose)?;
         let peer_allow_plaintext_endpoints = raw.peer_allow_plaintext_endpoints.unwrap_or(false);
+        let socks_proxy = resolve_socks_proxy(raw.socks_proxy)?;
         let peers = resolve_peers(raw.peers, peer_expose, peer_allow_plaintext_endpoints)?;
         // Resolved before every channel table rather than beside the other
         // money tables below, for two reasons that are now one rule.
@@ -750,6 +775,7 @@ impl Config {
             peers,
             peer_expose,
             peer_allow_plaintext_endpoints,
+            socks_proxy,
             peer_channels,
             pay_channels,
             operator,
@@ -879,15 +905,36 @@ impl Config {
         self.peer_allow_plaintext_endpoints
     }
 
-    /// Every peering whose endpoint is plaintext, as `(peer id, endpoint)`
-    /// -- what a node with [`Config::peer_allow_plaintext_endpoints`] set
-    /// must name in its startup warning. Always empty when the switch is
-    /// off, because such an endpoint could not have loaded.
+    /// Every peering whose endpoint is plaintext **and unauthenticated**,
+    /// as `(peer id, endpoint)` -- what a node with
+    /// [`Config::peer_allow_plaintext_endpoints`] set must name in its
+    /// startup warning. Always empty when the switch is off, because no
+    /// other endpoint with a plaintext scheme could have loaded.
+    ///
+    /// An **onion endpoint** is excluded (ADR 0070), and its exclusion is
+    /// the difference between a true warning and a false one. A `.onion`
+    /// endpoint loads its plaintext scheme without the switch, so it would
+    /// otherwise be named by a warning whose text says the switch is set;
+    /// and its claims do not "cross the wire in the clear" -- the circuit
+    /// is encrypted and authenticated to the very key the address is.
     pub fn plaintext_peerings(&self) -> impl Iterator<Item = (&str, &Url)> {
         self.peers.iter().filter_map(|peer| {
             let endpoint = peer.endpoint()?;
-            matches!(endpoint.scheme(), "ws" | "http").then_some((peer.id(), endpoint))
+            (matches!(endpoint.scheme(), "ws" | "http") && !is_onion_endpoint(endpoint))
+                .then_some((peer.id(), endpoint))
         })
+    }
+
+    /// The one SOCKS5 proxy this node dials onion endpoints through (ADR
+    /// 0070 decision 3), or `None` -- the default -- when every dial is
+    /// direct.
+    ///
+    /// Always `socks5h://` when present: [`Config::load`] refuses any other
+    /// scheme, so a caller never has to ask whether this proxy resolves
+    /// names for it. Which dials use it is not configured anywhere -- it is
+    /// read off the endpoint's host, and it covers the ILP wire only.
+    pub fn socks_proxy(&self) -> Option<&Url> {
+        self.socks_proxy.as_ref()
     }
 
     /// The payment channels this node judges peer claims against (ADR
@@ -984,6 +1031,57 @@ impl Config {
     pub fn state_dir(&self) -> Option<&Path> {
         self.state_dir.as_deref()
     }
+}
+
+/// Parse the one `socks_proxy` value, if the file wrote one (ADR 0070
+/// decision 3).
+fn resolve_socks_proxy(raw: Option<String>) -> Result<Option<Url>, ConfigError> {
+    raw.map(|value| parse_socks_proxy(&value)).transpose()
+}
+
+/// **The** `socks_proxy` rule: what a SOCKS5 proxy URL has to be for this
+/// connector to dial an onion endpoint through it (ADR 0070 decision 3).
+///
+/// Three checks, and each is a load-time refusal on purpose, because every
+/// failure it prevents is silent:
+///
+/// * it has to parse as a URL -- the usual mistake is a bare `host:port`,
+///   which is exactly the shape every other SOCKS-taking tool accepts;
+/// * the scheme has to be `socks5h`. A `socks5://` proxy asks the *client*
+///   to resolve the hostname and hands the proxy an address, and nothing on
+///   this machine can resolve a `.onion` name -- so a node that accepted one
+///   would come up clean, serve, and then fail every onion dial with a
+///   resolver error naming a host the operator can see is spelled correctly;
+/// * it has to name a host. `socks5h` is not a *special* scheme in the URL
+///   standard, so -- unlike every `https://` value in a config file --
+///   `socks5h://` parses with an empty host, and `socks5h:9050` parses as a
+///   scheme plus an opaque path rather than as the `host:port` it looks
+///   like. Either would load and then fail every onion dial on a proxy
+///   address that is not one.
+///
+/// **Public because `connector send` takes the same value as a flag.** That
+/// verb loads no config file (ADR 0070 decision 5), so it cannot reach
+/// [`Config::socks_proxy`] -- but it must not reach a *second rule* either.
+/// It calls this and renders the [`ConfigError`] into its own usage error,
+/// so there is one implementation of what a proxy URL is and one set of
+/// reasons an operator is given for a bad one.
+pub fn parse_socks_proxy(value: &str) -> Result<Url, ConfigError> {
+    let url = Url::parse(value).map_err(|source| ConfigError::SocksProxyInvalidUrl {
+        value: value.to_string(),
+        source,
+    })?;
+    if url.scheme() != "socks5h" {
+        return Err(ConfigError::SocksProxyScheme {
+            value: value.to_string(),
+            scheme: url.scheme().to_string(),
+        });
+    }
+    if url.host_str().is_none() {
+        return Err(ConfigError::SocksProxyNoHost {
+            value: value.to_string(),
+        });
+    }
+    Ok(url)
 }
 
 #[cfg(test)]
@@ -1688,6 +1786,117 @@ client_edge_url = "https://store.example/ilp"
 
         assert!(!config.peer_allow_plaintext_endpoints());
         assert_eq!(config.plaintext_peerings().count(), 0);
+    }
+
+    /// A minimal config plus whatever lines `extra` adds -- enough to
+    /// exercise a top-level scalar without dragging a peering in, since
+    /// `socks_proxy` is a node-wide value and validating it needs no peer
+    /// at all.
+    fn load_with_extra(extra: &str) -> Result<Config, ConfigError> {
+        with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+{extra}
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        })
+    }
+
+    /// ADR 0070 decision 3: the one proxy an operator writes down loads and
+    /// reads back off the loaded `Config`, unchanged.
+    #[test]
+    fn loads_a_socks5h_proxy() {
+        let config = load_with_extra(r#"socks_proxy = "socks5h://127.0.0.1:9050""#).expect("load");
+
+        assert_eq!(
+            config.socks_proxy().map(Url::as_str),
+            Some("socks5h://127.0.0.1:9050")
+        );
+    }
+
+    /// Absent is the default and the shape of every node that does not run
+    /// an onion sidecar -- which is every committed config in this
+    /// repository.
+    #[test]
+    fn a_config_with_no_socks_proxy_dials_direct() {
+        let config = load_with_extra("").expect("load");
+
+        assert!(config.socks_proxy().is_none());
+    }
+
+    /// The refusal ADR 0070 decision 3 exists for. `socks5://` is what
+    /// every other SOCKS-taking tool spells, and it is the one value that
+    /// would load and then break exactly the peerings the proxy was
+    /// configured for -- so the message has to carry the reason, not just
+    /// the rule.
+    #[test]
+    fn rejects_a_socks_proxy_whose_scheme_drops_the_h() {
+        for written in ["socks5://127.0.0.1:9050", "http://127.0.0.1:9050"] {
+            let result = load_with_extra(&format!("socks_proxy = \"{written}\""));
+
+            let message = expect_error(
+                result,
+                |error| matches!(error, ConfigError::SocksProxyScheme { value, .. } if value == written),
+            );
+            assert!(
+                message.contains("socks5h")
+                    && message.contains(".onion")
+                    && message.contains("LOCALLY"),
+                "the message must say why the 'h' is not a preference, got: {message}"
+            );
+        }
+    }
+
+    /// A separate variant from the scheme error, for the same reason a peer
+    /// endpoint has two: "you wrote a bare host:port" and "you wrote the
+    /// wrong scheme" are different mistakes with different fixes. This is
+    /// also the verdict `documented_config_keys.rs`'s probe gets when it
+    /// hands the key its dummy value, so it must not read as a key the
+    /// parser does not know.
+    #[test]
+    fn rejects_a_socks_proxy_that_is_not_a_url_at_all() {
+        let result = load_with_extra(r#"socks_proxy = "127.0.0.1:9050""#);
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::SocksProxyInvalidUrl { value, .. } if value == "127.0.0.1:9050"),
+        );
+        let lowered = message.to_lowercase();
+        assert!(
+            !lowered.contains("unknown field") && !lowered.contains("was removed"),
+            "socks_proxy is a key this parser knows; its message must not read as one it \
+             does not, got: {message}"
+        );
+    }
+
+    /// A value that parses but names no proxy is refused too. `socks5h` is
+    /// not a *special* URL scheme, so both of these load as far as `Url` is
+    /// concerned -- and a loaded `Config` is supposed to need no further
+    /// validation anywhere (ADR 0009), so "it parsed" is not the bar.
+    #[test]
+    fn rejects_a_socks_proxy_that_names_no_host() {
+        for written in [
+            // The scheme and nothing else.
+            "socks5h://",
+            // Looks like a `host:port`, and is a scheme plus an opaque
+            // path -- the likelier of the two to be written by hand.
+            "socks5h:9050",
+        ] {
+            let result = load_with_extra(&format!("socks_proxy = \"{written}\""));
+            let message = expect_error(
+                result,
+                |error| matches!(error, ConfigError::SocksProxyNoHost { value } if value == written),
+            );
+            assert!(
+                message.contains("socks5h://<host>:<port>"),
+                "the message has to show the shape that works, got: {message}"
+            );
+        }
     }
 
     /// The old shape was a `SocketAddr`, so URL parsing is new and its

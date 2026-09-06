@@ -209,9 +209,11 @@ packet. That is this, and only this.
 | `solo/`        | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its route.                     |
 | `two-hop/`     | 2     | Two images peered over ILP-over-HTTP on anvil. B prices the route it terminates; A covers each crossing with a real EIP-712 claim on a real funded channel. |
 | `mixed-chain/` | 3     | A↔B on EVM over BTP, B↔C on Solana over ILP-over-HTTP, B holding both backends. One packet crosses two chains and two carriages.                            |
+| `onion/`       | 2     | B reachable only at a `.onion` address a real `anon` sidecar generates, the two on separate docker networks with no route between them. Not on the CI gate. |
 
 `LOCAL_TOPOLOGY` picks one (`solo` is the default); `make local-verify` runs the cycle and
-`.github/workflows/local-topologies.yml` runs all three. The peered topologies cross more than
+`.github/workflows/local-topologies.yml` runs the first three — `onion` needs a third-party
+anonymity network and is deliberately off that gate (ADR 0070). The peered topologies cross more than
 once and then read the payee's own claim journal, because a peer claim's verdict rides back
 out of band and never gates the packet — `--expect-fulfill` alone would go green over a
 peering carrying traffic for free. `local/README.md` is the long version and is worth reading
@@ -249,7 +251,7 @@ there".
 | `adr/`          | The numbered decisions, and the tiebreaker for everything else in this repository. `README.md` is the index — grouped by scope, with each record's own `**Status:**` line as the authority for whether it is live. Numbers are permanent and never reused. |
 | `protocol/`     | The wire specs the ADRs are implemented against: `client-edge-spec.md`, `peer-carriage-spec.md`, `operator-spec.md`, `configuration-spec.md`, `packet-flow-spec.md`, `payment-spec.md`, `self-description-spec.md`, `wire-vectors.md`.                     |
 | `rfcs/`         | The Interledger RFCs this connector implements — see below.                                                                                                                                                                                                |
-| `operators/`    | Runbooks: box bringup, key rotation, fleet release and health, peer-channel migration, BTP peer bringup, the claim-policy rollout, box reconciliation.                                                                                                     |
+| `operators/`    | Runbooks: box bringup, key rotation, fleet release and health, peer-channel migration, BTP peer bringup, onion-endpoint bringup, the claim-policy rollout, box reconciliation.                                                                             |
 | `agents/`       | Conventions for agents working here: the issue tracker, triage labels, how to consume the domain docs.                                                                                                                                                     |
 | `architecture/` | This page, plus [`tech-stack.md`](tech-stack.md) (languages, runtimes, pinned versions) and [`coding-standards.md`](coding-standards.md) (what the gate enforces, in the order it enforces it).                                                            |
 
