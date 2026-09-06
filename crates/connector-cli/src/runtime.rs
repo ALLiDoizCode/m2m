@@ -18,8 +18,9 @@ use connector_client_edge::{
     UnresolvableLookupBudgetPolicy,
 };
 use connector_config::{
-    ClientChannelConfig, Config, EvmSettlementConfig, PayChannelConfig, PeerCarriage,
-    PeerChannelConfig, SecretLocation, SettlementChain, SettlementConfig, SolanaSettlementConfig,
+    is_onion_endpoint, ClientChannelConfig, Config, EvmSettlementConfig, PayChannelConfig,
+    PeerCarriage, PeerChannelConfig, SecretLocation, SettlementChain, SettlementConfig,
+    SolanaSettlementConfig,
 };
 use connector_runtime::{
     BoundedHttpSelfDescription, ChannelDomain, ClaimStateChallengeSigner, Connector, EvmDomain,
@@ -1243,6 +1244,41 @@ fn wire_peer_channels(
 /// understand it, and the inbound and outbound books must never merge.
 const OUTBOUND_CLIENT_LEDGER: &str = "outbound-client.log";
 
+/// The client one `[[pay_channels]]` hop asks `POST /ilp/claim-state` with,
+/// dialed through `socks_proxy` when — and only when — that hop's client
+/// edge is an onion one (ADR 0070 decision 3).
+///
+/// **The same host-selected rule the carriages apply, at the one ILP-wire
+/// dial that is not a carriage.** `cover_forward` asks the receiver where
+/// this node's claims stand on *every* covered PREPARE (issue #1102), so a
+/// peering whose far side is only reachable over a circuit is not payable
+/// unless this ask can reach it too — the packet would be refused for want
+/// of a covering claim long before the carriage was asked to carry it. It is
+/// the ILP wire by ADR 0070 decision 4's own division: the two things that
+/// decision keeps direct are settlement RPC and the app's `handler_url`, and
+/// both hold their own clients elsewhere.
+///
+/// [`is_onion_endpoint`] is called rather than re-derived, for the reason
+/// that function's own doc gives: the suffix that decides a carriage and the
+/// suffix that decides a dial are one implementation.
+///
+/// A `.onion` client edge on a node that configured **no** proxy builds a
+/// plain client and fails at the dial, which is the same answer the
+/// carriages give: a `.onion` name resolves nowhere without a proxy, so the
+/// covering claim fails as an unreachable hop rather than as anything more
+/// exotic.
+fn claim_state_client(
+    client_edge_url: &url::Url,
+    socks_proxy: Option<&url::Url>,
+    answer_timeout: std::time::Duration,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder().timeout(answer_timeout);
+    if let (true, Some(proxy)) = (is_onion_endpoint(client_edge_url), socks_proxy) {
+        builder = builder.proxy(reqwest::Proxy::all(proxy.as_str())?);
+    }
+    builder.build()
+}
+
 /// Wire every `[[pay_channels]]` row into the connector's client role (ADR
 /// 0042 item 2, issue #881): the ledger this node signs outbound client
 /// claims from, and, per next hop, the channel it pays from plus the hop
@@ -1287,7 +1323,9 @@ const OUTBOUND_CLIENT_LEDGER: &str = "outbound-client.log";
 /// `peer_answer_timeout_ms` rather than a new knob: the claim-state ask is a
 /// request to that peer, on the packet's hot path, and a hop that stops
 /// answering must fail the packet inside the peering's own answer budget
-/// instead of holding it until the PREPARE expires.
+/// instead of holding it until the PREPARE expires. It is also the one dial
+/// on this path that goes through the SOCKS5 proxy when the hop is onion --
+/// see [`claim_state_client`].
 fn wire_outbound_client_hops(
     mut connector: Connector,
     config: &Config,
@@ -1345,13 +1383,15 @@ fn wire_outbound_client_hops(
             .find(|peer| peer.id() == pay_channel.peer_id())
             .map(|peer| std::time::Duration::from_millis(peer.peer_answer_timeout_ms()))
             .ok_or_else(|| unwirable(pay_channel, "peering for that peer_id"))?;
-        let client = reqwest::Client::builder()
-            .timeout(answer_timeout)
-            .build()
-            .map_err(|source| RuntimeError::ClaimStateClientUnusable {
-                peer_id: pay_channel.peer_id().to_string(),
-                source,
-            })?;
+        let client = claim_state_client(
+            pay_channel.client_edge_url(),
+            config.socks_proxy(),
+            answer_timeout,
+        )
+        .map_err(|source| RuntimeError::ClaimStateClientUnusable {
+            peer_id: pay_channel.peer_id().to_string(),
+            source,
+        })?;
         // The challenge signer and the claim signer are the same key, on
         // the channel's own chain: the ask proves control of the channel's
         // on-chain participant, and the claim is signed by it.
@@ -1563,8 +1603,14 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // operator-supplied host, and it is bounded (ADR 0058): a whole-
     // exchange timeout, a body cap enforced as the body streams, and no
     // redirect followed. Never reached from the packet path.
+    // ADR 0070 decision 3: an onion counterparty's self-description is read
+    // through the same one proxy the carriages dial through, selected by the
+    // same host rule. Without it `POST /peers` could not establish a peering
+    // with a node whose only published URL is a `.onion` one -- the write
+    // reads that URL before any carriage is chosen.
     .with_self_description_source(Arc::new(BoundedHttpSelfDescription::new(
         config.peer_allow_plaintext_endpoints(),
+        config.socks_proxy(),
     )))
     // The same node-wide opt-in a `[[peers]]` endpoint takes (issue #678
     // gap 3), so a peering established at runtime picks its carriage by
@@ -4114,6 +4160,94 @@ key_file = "{key_file}"
                 },
             )
             .expect("nothing declared, nothing to disagree");
+        }
+    }
+
+    /// **Which socket the claim-state ask left on** (ADR 0070 decision 3).
+    ///
+    /// A covering payer asks the receiver where its claims stand on every
+    /// PREPARE it covers, so this dial is as much the ILP wire as the
+    /// carriage that carries the packet afterwards -- and a hop reachable
+    /// only over a circuit is not payable unless it goes the same way. No
+    /// configuration value can answer "where did that connection go", so the
+    /// assertion is made against a real SOCKS5 server on loopback, exactly
+    /// as the two carriage crates make theirs. Nothing here reaches a
+    /// third-party network and there is no daemon: a `.onion` name resolves
+    /// nowhere, which is why finding it in the proxy's own record proves
+    /// both that the dial traversed the proxy and that it deferred
+    /// resolution to it.
+    mod claim_state_dial {
+        use super::*;
+
+        use connector_runtime::Socks5TestServer;
+
+        /// A v3 onion address's shape -- 56 base32 characters -- so the host
+        /// under test is one an operator could have copied out of a
+        /// `HiddenServiceDir/hostname` (ADR 0070 decision 7). No such
+        /// service exists; nothing here expects one to.
+        const ONION_HOST: &str = "toonexampleconnectoraddress234567abcdefghijklmnopqrstuvw.onion";
+
+        fn timeout() -> std::time::Duration {
+            std::time::Duration::from_secs(5)
+        }
+
+        #[tokio::test]
+        async fn an_onion_client_edge_is_asked_through_the_proxy() {
+            let proxy = Socks5TestServer::spawn_recording_only().await;
+            let url = url::Url::parse(&format!("http://{ONION_HOST}/ilp")).expect("onion url");
+
+            let client = claim_state_client(&url, Some(&proxy.proxy_url()), timeout())
+                .expect("a socks5h proxy builds a client");
+            let refused = client.post(url.as_str()).send().await;
+
+            assert!(
+                refused.is_err(),
+                "the proxy routes nothing, so the ask cannot succeed: {refused:?}"
+            );
+            assert_eq!(
+                proxy.targets(),
+                vec![format!("{ONION_HOST}:80")],
+                "the claim-state ask reached the proxy, and reached it as a NAME -- no resolver \
+                 here can resolve a .onion, so a client that had tried to resolve it locally \
+                 would never have got this far"
+            );
+        }
+
+        /// The other half, and the one that makes the rule a SELECTION
+        /// rather than a mode: the same node, the same proxy, a clearnet
+        /// hop, and the proxy sees nothing.
+        #[tokio::test]
+        async fn a_clearnet_client_edge_is_asked_direct() {
+            let proxy = Socks5TestServer::spawn_recording_only().await;
+            // Bound and then dropped: the port is closed, so the direct dial
+            // fails fast. What is under test is where it went, and a refusal
+            // from loopback is evidence it went to loopback.
+            let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = closed.local_addr().expect("addr");
+            drop(closed);
+            let url = url::Url::parse(&format!("http://{addr}/ilp")).expect("clearnet url");
+
+            let client = claim_state_client(&url, Some(&proxy.proxy_url()), timeout())
+                .expect("a socks5h proxy builds a client");
+            let _ = client.post(url.as_str()).send().await;
+
+            assert!(
+                proxy.targets().is_empty(),
+                "a clearnet client edge must be dialed direct even on a node that configured a \
+                 proxy: one onion peering must not reroute the hops this node already pays, {:?}",
+                proxy.targets()
+            );
+        }
+
+        /// A node with no proxy still builds a client for an onion hop, and
+        /// the covering claim then fails at the dial. Not a config refusal:
+        /// `socks_proxy` is optional by design, and an unreachable hop is an
+        /// unreachable hop.
+        #[test]
+        fn an_onion_client_edge_without_a_proxy_still_builds() {
+            let url = url::Url::parse(&format!("http://{ONION_HOST}/ilp")).expect("onion url");
+
+            assert!(claim_state_client(&url, None, timeout()).is_ok());
         }
     }
 

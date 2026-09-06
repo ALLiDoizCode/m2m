@@ -16,8 +16,10 @@ All of them work in one compose project, `connector`, named in
 stack per machine and `make local-down` reaches it from any checkout of this
 repository; `make local-preflight` says whether it is free.
 
-Or `make local-verify` for all three, which is what CI runs
-(`.github/workflows/local-topologies.yml`).
+Or `make local-verify` for the three that need nothing but this machine, which
+is what CI runs (`.github/workflows/local-topologies.yml`). The fourth,
+`onion`, needs a working third-party anonymity network and is deliberately not
+on that gate — see below.
 
 `LOCAL_TOPOLOGY` picks which one; `solo` is the default.
 
@@ -67,11 +69,12 @@ nothing left to forward.
 
 ## Topologies
 
-| Topology                       | Nodes | What it proves                                                                                                                                                                                                                                                                                                               |
-| ------------------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`solo/`](solo/)               | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route.                                                                                                                                                                                  |
-| [`two-hop/`](two-hop/)         | 2     | Two images peered over ILP-over-HTTP. B **prices** the route it terminates; A covers each crossing before sending it, with a real EIP-712 claim on a real funded channel on the local anvil.                                                                                                                                 |
-| [`mixed-chain/`](mixed-chain/) | 3     | A↔B settles on EVM **over BTP**, B↔C on Solana **over ILP-over-HTTP**, and B holds both backends. One packet crosses two chains _and_ two carriages — the only place a shipped image carries a packet over BTP at all — and B **enforces** on the arrival it forwards, the only place ADR 0042 item 3's enforcing path runs. |
+| Topology                       | Nodes | What it proves                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`solo/`](solo/)               | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route.                                                                                                                                                                                                                                  |
+| [`two-hop/`](two-hop/)         | 2     | Two images peered over ILP-over-HTTP. B **prices** the route it terminates; A covers each crossing before sending it, with a real EIP-712 claim on a real funded channel on the local anvil.                                                                                                                                                                                 |
+| [`mixed-chain/`](mixed-chain/) | 3     | A↔B settles on EVM **over BTP**, B↔C on Solana **over ILP-over-HTTP**, and B holds both backends. One packet crosses two chains _and_ two carriages — the only place a shipped image carries a packet over BTP at all — and B **enforces** on the arrival it forwards, the only place ADR 0042 item 3's enforcing path runs.                                                 |
+| [`onion/`](onion/)             | 2     | The peering rides a **real onion network**: B is reachable only at a `.onion` address its `anon` sidecar generates, and the two connectors are on separate docker networks with **no route between them**, so a direct dial is impossible rather than merely unobserved. The only topology where an endpoint's HOST decides how it is dialed (ADR 0070). Not on the CI gate. |
 
 `two_ledgers_never_merge.rs` is named for the both-chains concern and proves it
 in-process; `solo` is the only place a node is actually stood up with an EVM and
@@ -98,6 +101,128 @@ the spread with a flat per-packet fee, and value conversion is the `swap`
 repo's job). It is one node settling with different peers on different chains,
 and the only thing that changes an amount between two hops is a hop subtracting
 its own flat fee — 1200 sent, 1100 across the boundary, 1050 delivered.
+
+## The onion topology
+
+`onion` is the only place in this repository where an endpoint's **host**
+decides how it is dialed. B publishes no clearnet address at all: an `anon`
+sidecar generates a `.onion` address for it, A dials
+`ws://<addr>.onion/ilp/btp` through a SOCKS5 proxy on its own side, and the
+packet is paid for with an ordinary EIP-712 claim on an ordinary anvil
+channel. Nothing about the peering, the claim book or the money changes —
+which is ADR 0070's whole claim, stated as a deployment: an onion address is a
+**host**, not a carriage.
+
+**There is no route between the two connectors, and that is the evidence.** A
+fulfilled packet proves nothing about the circuit — a SOCKS dial that silently
+fell back to a direct connection would fulfil exactly as happily — so a direct
+dial has to be structurally impossible rather than merely unobserved. Each
+connector sits on its own docker network with its own sidecar; docker does not
+route between two user-defined bridge networks and its embedded DNS is per
+network, so A cannot reach `connector-b` and cannot even resolve the name.
+`anvil` joins both, because both nodes settle on it, and a container attached
+to two bridges forwards nothing between them. B publishes no host port either:
+its only door is the circuit.
+
+The peering is **BTP**, deliberately. The HTTP carriage asks its own client for
+a proxy and gets one; the websocket library the BTP carriage speaks has none at
+all, so its onion path establishes a SOCKS5 stream itself and hands the
+already-established stream to the websocket client. That is the larger of the
+two carriage changes and the one a loopback SOCKS5 fake can least stand in for.
+The client edge rides the same onion service on the same port, because it is
+the same listener — one hidden service, both surfaces.
+
+### The address does not exist until the daemon has run
+
+ADR 0070 decision 7: the daemon generates the address into its
+`HiddenServiceDir/hostname` and **the operator copies it** into `[node]` and
+into the dialing node's peer `endpoint`. The connector never reads that file
+and never speaks the daemon's control protocol.
+
+That collides with the committed-config discipline the rest of this directory
+keeps, and the resolution is a **placeholder and a render**:
+
+- `local/onion/connector-a.toml` and `connector-b.toml` are committed with a
+  placeholder `.onion` host. A placeholder still ends in `.onion`, so the
+  committed files load through the real parser and stay meaningful to
+  `local_topologies_load.rs` — which is the whole reason for committing a
+  config rather than generating one.
+- `local/keys.sh onion` plays the operator. It starts the sidecars, reads the
+  address out of `hostname`, and writes both configs out again with the address
+  substituted, into `local/.keys/onion/<node>/connector.toml`.
+- Compose mounts **the rendered copy**. Mounting the committed one would boot a
+  node whose peer endpoint is the placeholder.
+
+It is the manual step automated exactly as far as it goes, and no further:
+what changes is who does the copying, not what the connector reads.
+
+**No hidden-service key is ever committed.** The daemon's key lives in the
+named volume beside the `hostname` file and nowhere else — nothing on the host
+filesystem holds it, `tools/ci/check-tracked-secrets.sh` would refuse it if
+anything tried, and a fixed onion key in a public repository is an address
+anyone who cloned the repository could impersonate. The volume is what makes
+the address survive a **restart**, which is ADR 0070's operational point: an
+unpersisted `HiddenServiceDir` changes the node's address on every start and
+every counterparty's configuration goes stale silently. `make local-down`
+removes it with every other state volume, which is a different thing — the next
+bring-up reads a new address and renders it in.
+
+The daemon needs `AgreeToTerms 1` in its `anonrc` or it does not start: in a
+container it fails fast rather than prompting. Both `local/onion/anonrc-a` and
+`anonrc-b` carry it, and both carry a `Nickname` line for a less obvious
+reason — the image's entrypoint appends one when it finds none, and these files
+are mounted read-only.
+
+### What is still dialed direct
+
+Settlement RPC and the app's `handler_url` (ADR 0070 decision 4). Both nodes
+reach `anvil` from their real addresses, and no key anywhere says so: the
+host-selected rule reads the answer off each endpoint. An onion endpoint hides
+**where a node is reachable** and nothing else, and this topology makes no
+anonymity claim beyond that sentence.
+
+The one dial worth knowing about because it is easy to forget is the
+**claim-state ask**. A covering payer asks the payee where its claims stand on
+every covered PREPARE (issue #1102), so A's `[[pay_channels]]` row names B's
+onion client edge and that ask goes through the same proxy the carriage does —
+a hop reachable only over a circuit is not payable otherwise, and the packet
+would be refused for want of a covering claim long before the carriage was
+asked to carry it.
+
+## Why the onion topology is not on the CI gate
+
+`.github/workflows/local-topologies.yml` runs `solo`, `two-hop` and
+`mixed-chain`. It does not run `onion`, and that absence is a decision rather
+than an oversight — **please do not fix it**.
+
+This repository's rule is that a test **either runs or fails loudly**.
+`require_anvil()` panics when `CI` is set rather than skipping, because a guard
+that returns early and reports `passed` in `0.00s` is worse than a missing
+test: it claims something. A gate that goes red when a third-party anonymity
+network has a bad day is that rule **inverted** rather than honoured. The red
+would say nothing about this repository, and the only sustainable responses to
+it are the two this rule exists to forbid: retry until green, or add a skip.
+
+The connector's own change is already on the gate and needs no network and no
+daemon. "Dial through SOCKS5" and "accept a `.onion` host as a valid endpoint"
+are both asserted in `cargo test` against a real SOCKS5 server on loopback —
+`Socks5TestServer`, in `connector-runtime`'s test support — and the dial is
+proved to have traversed it by the target the proxy recorded, not by a call
+being counted. What this topology adds is the **composition**: a real daemon, a
+real circuit, two containers that cannot reach each other any other way. That
+is demonstrated by running it, which is what it is for.
+
+Run it by hand, on a machine with a working onion network:
+
+```sh
+make local-verify LOCAL_TOPOLOGY=onion
+```
+
+Bootstrapping a circuit takes minutes rather than seconds, so the sidecars'
+health gates wait on `Bootstrapped 100%` and the rehearsal then waits for a
+rendezvous with `connector send --dry-run` — which fetches B's
+self-description over the circuit and sends no packet, so waiting costs no
+crossing the money assertion would have to account for.
 
 ## Keys and money
 

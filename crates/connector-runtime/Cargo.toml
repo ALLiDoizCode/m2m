@@ -4,6 +4,16 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+# The SOCKS5 server fake (`socks5_test_server`), which BINDS A LISTENER and
+# is therefore not something the shipped binary should carry. Both peer
+# carriage crates need it and a `#[cfg(test)]` item is invisible outside its
+# own crate, so it is gated rather than private -- each crate that tests
+# against it turns this on in its `[dev-dependencies]`, and `cargo build`
+# leaves it out. Deliberately unlike `FakeAppClient`/`TestClock`, which are
+# ordinary values with no socket of their own.
+test-support = []
+
 [dependencies]
 connector-domain = { path = "../connector-domain" }
 connector-config = { path = "../connector-config" }

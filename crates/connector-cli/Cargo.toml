@@ -37,7 +37,13 @@ chrono = "0.4"
 # the same curve and the same crate `connector-operator` verifies with.
 ed25519-dalek = "1"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
+# `socks` because ADR 0070 decision 5 gives `connector send` a
+# `--socks-proxy` flag, and an onion URL -- the operator surface it signs a
+# write to, or the `--seal-to` node whose self-description it fetches -- is
+# dialed through that proxy, which is a dial reqwest cannot make without
+# this feature. Same 0.11 the carriage and the runtime already resolve to,
+# and the same `tokio-socks` already in the lockfile.
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json", "socks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 solana-sdk = "=2.1.0"
@@ -47,8 +53,16 @@ tokio = { version = "1", features = ["net", "time"] }
 tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 tracing = "0.1"
+# `is_onion_endpoint` takes a parsed `Url`, and a proxy value is refused at
+# parse time by its scheme and its host (ADR 0070 decision 5) -- both are
+# questions about a URL, asked of the same crate every other URL in this
+# workspace is parsed by.
+url = "2"
 
 [dev-dependencies]
+# `test-support` for the SOCKS5 server fake the onion dial tests dial through
+# (ADR 0070). A dev-dependency, so `cargo build` never carries a listener.
+connector-runtime = { path = "../connector-runtime", features = ["test-support"] }
 base64 = "0.22"
 # Reads a Solana channel account and program id back off a rendered claim
 # and a rendered claim-state ask (issue #1146's `[[pay_channels]]` wiring

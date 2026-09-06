@@ -562,6 +562,15 @@ listener with mandatory authentication**. If it does:
   whose endpoint scheme selects no carriage this connector dials registers none, and packets routed
   to it get §2.2's `T01` with the peer named.
 
+  **A host ending in `.onion` permits the plaintext schemes** ([ADR 0070](../adr/0070-an-onion-address-is-a-host-not-a-carriage.md)):
+  `ws://` → BTP and `http://` → HTTP when, and only when, the endpoint's host has that suffix. This
+  adds no carriage — an onion address is a **host**, and both carriages ride it unchanged — and it is
+  independent of `peer_allow_plaintext_endpoints`, which keeps its own meaning and its own scope. The
+  exemption is narrow because of what a v3 onion address is: the address _is_ the ed25519 public key
+  the circuit is authenticated to, so such an endpoint authenticates itself and ADR 0004's
+  requirement is satisfied by a different mechanism rather than waived. At every other host, a
+  plaintext scheme remains the error this sentence's second clause requires.
+
 These are independent. Exposing BTP says nothing about how any peer is dialed; dialing a peer over
 HTTP says nothing about what this connector listens on.
 
@@ -1545,7 +1554,7 @@ Named load-time errors this specification requires (spelling #677's, identity ou
 | Error                                           | Condition                                                                                                                                                                                                                                                                                                                   | Source             |
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
 | `PeerUndialable`                                | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                                                                                                                                          | §2.2               |
-| `PeerEndpointScheme`                            | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                                                                                                                               | §2.1               |
+| `PeerEndpointScheme`                            | an `endpoint` whose scheme is neither `wss://` nor `https://` — nor, at a `.onion` host, `ws://` or `http://` (ADR 0070)                                                                                                                                                                                                    | §2.1               |
 | `PeerCredentialRemoved`                         | a `[[peers]]` entry setting `credential` at all — the `{peerId, secret}` shared secret is deleted and nothing replaces it, so a file writing one is stopped **by name** rather than peered without it. Replaces `PeerCredentialMissing` ("no credential — it could never satisfy P1"), a requirement that no longer exists  | §1.2, ADR 0060     |
 | `PeerChannelUnbound`                            | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                                                                                                                                             | §1.2               |
 | `PeerChannelOrphaned`                           | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                                                                                                                                       | §1.2               |

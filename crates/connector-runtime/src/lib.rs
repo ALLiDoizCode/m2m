@@ -14,6 +14,12 @@ mod peer_transport;
 mod peering;
 mod route;
 mod self_description;
+// Behind a feature rather than `#[cfg(test)]`, unlike `test_support` below:
+// both peer-carriage crates need it and a `#[cfg(test)]` item is invisible
+// outside its own crate -- but it binds a listener, so the shipped binary
+// must not carry it either. See the module's header.
+#[cfg(any(test, feature = "test-support"))]
+mod socks5_test_server;
 #[cfg(test)]
 mod test_support;
 
@@ -55,7 +61,9 @@ pub use outbound_client::{
 pub use peer_route_store::{
     PeerRouteStore, PeerRouteStoreError, RuntimePeerChannel, RuntimePeering, RuntimePeers,
 };
-pub use peer_transport::{InProcessPeerTransport, PeerForward, PeerRegistrar, PeerTransport};
+pub use peer_transport::{
+    InProcessPeerTransport, PeerForward, PeerRegistrar, PeerTransport, NO_SOCKS_PROXY,
+};
 // ADR 0058's one operator write: establish a peering from a URL.
 pub use peering::{
     ChannelBranch, EstablishPeeringError, EstablishedChannel, PeeringEstablished,
@@ -69,3 +77,5 @@ pub use self_description::{
     BoundedHttpSelfDescription, SelfDescriptionError, SelfDescriptionSource,
     UnreachableSelfDescription, FETCH_TIMEOUT, MAX_DOCUMENT_BYTES,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use socks5_test_server::Socks5TestServer;

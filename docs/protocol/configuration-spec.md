@@ -315,6 +315,7 @@ spell it however it likes.
 | `[node]`                                   | table                                 | —        | CF-08, the facts a node cannot introspect            |
 | `peer_expose`                              | `"neither"`/`"btp"`/`"http"`/`"both"` | no       | CF-17                                                |
 | `peer_allow_plaintext_endpoints`           | bool                                  | no       | CF-18's node-wide opt-in                             |
+| `socks_proxy`                              | `socks5h://` URL                      | no       | ADR 0070, the one onion dial path                    |
 | `state_dir`                                | path                                  | CF-39    | where durable state lives                            |
 
 **How the file is read.** Every table in it is `deny_unknown_fields`, so an unrecognised key — a typo,
@@ -359,6 +360,17 @@ dedicated peer listener. A node that leaves it at its `"neither"` default still 
 both client transports, and a node that sets it still serves an anonymous client that presents no
 identity at all (CF-27). It is also the one peering fact the node self-description publishes: which
 carriages exist, never who rides them.
+
+**`socks_proxy` is one proxy, selected by host.** It names the single SOCKS5 proxy an onion endpoint
+is reached through ([ADR 0070](../adr/0070-an-onion-address-is-a-host-not-a-carriage.md)); which dials
+take it is read off the endpoint's own host — a host ending in `.onion` — so there is no per-peer
+`proxy` key and no all-outbound mode, and nothing in this file states it a second time. It covers the
+ILP wire only: settlement RPC and a route's `handler_url` are outside its scope. The value must name a
+host — `socks5h` is not a _special_ URL scheme, so `socks5h://` and `socks5h:9050` both parse and
+neither is a proxy address, and both are refused by name. The scheme must be
+`socks5h://` and every other scheme is refused by name at load, because a `socks5://` proxy resolves
+the hostname locally, no local resolver resolves a `.onion` name, and a node that accepted one would
+fail its onion peerings at dial time instead of at the line an operator wrote.
 
 **The three channel books** (CF-21) are told apart by what each does with a claim. `[[peer_channels]]`
 is the channel a peering's claims are **judged against**, and names the `counterparty_key` whose
