@@ -290,9 +290,9 @@ pub enum ConfigError {
          carriage: 'wss://' selects BTP and 'https://' selects ILP-over-HTTP, and there is no \
          third one (ADR 0027 deleted the raw-TCP transport). Both are TLS-only because a \
          peering carries signed balance proofs (ADR 0004), so 'ws://' and 'http://' are not \
-         accepted either -- except at a host ending in '.onion', which authenticates the \
-         circuit with its own key and needs no certificate (ADR 0070), and this host is not \
-         one; see docs/operators/btp-peer-transport-bringup.md"
+         accepted either -- except at a host ending in '.onion' or '.anyone', which \
+         authenticates the circuit with its own key and needs no certificate (ADR 0070), and \
+         this host is not one; see docs/operators/btp-peer-transport-bringup.md"
     )]
     PeerEndpointScheme {
         id: String,
@@ -1151,9 +1151,9 @@ pub enum ConfigError {
     #[error(
         "socks_proxy '{value}' has scheme '{scheme}', but it must be 'socks5h'. The 'h' is not \
          a preference: a 'socks5://' proxy resolves the hostname LOCALLY and dials the address \
-         it gets back, and no local resolver can resolve a '.onion' name -- so a node that \
-         started with one would come up clean and then fail every onion peering at dial time, \
-         for a reason nothing in its log explains. Resolution has to happen AT the proxy, which \
+         it gets back, and no local resolver can resolve a '.onion' or '.anyone' name -- so a \
+         node that started with one would come up clean and then fail every onion peering at \
+         dial time, for a reason nothing in its log explains. Resolution has to happen AT the proxy, which \
          is what 'socks5h://' asks for (ADR 0070)"
     )]
     SocksProxyScheme { value: String, scheme: String },

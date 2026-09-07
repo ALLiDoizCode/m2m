@@ -1,6 +1,8 @@
 # An onion address is a host, not a carriage
 
-**Status:** Accepted — built (#1273). Extends
+**Status:** Accepted — built (#1273), **amended in place by issue #1284** (the hidden-service TLD
+is a spelling: `.anyone` is a host on the same terms `.onion` is — see the Amendment below).
+Extends
 [0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md) by naming what
 an onion endpoint is _not_: it adds no third carriage and reopens nothing 0027 closed. Narrows
 [0004](0004-value-moves-on-fulfilment.md)'s wire-authentication requirement in exactly one place, by
@@ -184,3 +186,51 @@ direct connection would go green. It puts each connector on its own network with
 them, so that a direct dial is **structurally impossible** rather than merely unobserved, and it
 keeps `two-hop`'s claim-journal read so the peering is shown to have charged and not merely
 connected.
+
+## Amendment (issue #1284): the TLD is a spelling, and both spellings are hosts
+
+Anyone Protocol's `anon` **renamed the hidden-service TLD** between v0.4.9.7 and v0.4.10.2, and the
+rename is total in both directions. v0.4.10.2 writes `<56-base32>.anyone` into
+`HiddenServiceDir/hostname`, routes that name through its SOCKS port, and refuses the same address
+spelled `.onion`; `strings anon | grep -cF .onion` on it returns **0**. v0.4.9.7 does the exact
+opposite. Neither release resolves the other's spelling, so the two are not two names for one
+network reachability — they are two networks as far as any single daemon is concerned.
+
+This record was written against the older release, and `toon-client` pins the newer one. The result
+was an interoperability break in which neither side was wrong on its own: a node brought up by
+`local/onion` published an address that client refused, and the client dialed a TLD that daemon
+could not resolve.
+
+**Both suffixes are accepted.** `is_onion_endpoint` — still the one implementation of the host rule,
+per decision 2 — matches a host ending in `.onion` **or** `.anyone`. Nothing else about this record
+changes: not the decisions, not `PeerCarriage`'s two values, not `peer_allow_plaintext_endpoints`'s
+meaning or scope, and not decision 4's refusal to proxy settlement.
+
+**Why the argument carries over unchanged.** Decision 2's exemption is earned by what a v3 address
+_is_ — the base32 encoding of the ed25519 public key the circuit is encrypted and authenticated to.
+That is a property of the address, not of the label after the last dot. A client that reached
+`abc…xyz.anyone` reached the holder of that key or reached nothing, exactly as at `.onion`. ADR
+0004's requirement is satisfied by the same different mechanism.
+
+**Why `.onion` stays.** Dropping it would follow upstream and buy nothing this repository wants. The
+check is a suffix test either way, so keeping both costs one `ends_with`; a node whose operator runs
+the older daemon keeps working; and Tor's own `.onion` names have the identical property the
+exemption is granted for. What would be gained by narrowing is a config that fails to load for a
+reason that is upstream's release cadence rather than this connector's rule.
+
+**The narrowness that matters is untouched.** These are suffixes and not substrings, so
+`anyone.example` and `notreally.onion.example` are ordinary clearnet hosts and a plaintext scheme at
+either is still `PeerEndpointScheme`. The suite that says so runs every host-suffix case at both
+spellings (`crates/connector-runtime/tests/an_onion_host_is_a_host.rs`).
+
+**The vocabulary keeps the word "onion".** `CONTEXT.md`'s **onion endpoint**, this record's title and
+`is_onion_endpoint` all name the mechanism — an address that is a key, reached over a circuit through
+a SOCKS5 proxy selected by host — and not the TLD it is spelled in. Renaming them to track a
+third-party daemon's release notes would churn a thousand citations to say the same thing. What the
+name must never mean again is _one_ spelling: that reading is what this amendment closes.
+
+**`local/onion` runs the current daemon.** ghcr publishes no image for v0.4.10.2 — its
+`ator-protocol` tags stop at v0.4.9.7 — so `local/anon-image` builds one by overlaying the official
+release binary, sha256-verified, onto that image, and both hidden-service topologies use it. The
+committed placeholder hosts are spelled `.anyone` to match what that daemon actually writes, and
+`local_topologies_load.rs` holds the placeholder's TLD and the image's pinned version to one fact.

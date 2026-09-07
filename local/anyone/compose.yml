@@ -13,12 +13,16 @@
 #
 # ── How this differs from local/onion ────────────────────────────────────────
 #
-# `local/onion` proves a PEERING between two connectors over anon v0.4.9.7,
-# whose hidden-service TLD is `.onion`. This proves the CLIENT EDGE against the
-# `toon-client` payer over anon v0.4.10.2, whose TLD is `.anyone` -- a rename
-# upstream made between those two releases. The two topologies therefore pin
-# DIFFERENT daemon images on purpose, and an address from one is unreachable
-# through the other's proxy. See README.md.
+# `local/onion` proves a PEERING between two connectors. This proves the CLIENT
+# EDGE against the `toon-client` payer: the real payer, a different
+# repository's library rather than `connector send`, discovering and paying
+# this node over a circuit.
+#
+# Both run the SAME daemon, `local/anon-image` (anon v0.4.10.2, TLD `.anyone`).
+# They pinned different ones while issue #1284 was open -- upstream renamed the
+# TLD and this repository was on the older side of the rename -- and that is
+# closed: the connector accepts both spellings and both topologies run the
+# current daemon. See README.md.
 #
 # ── Why there are two networks ───────────────────────────────────────────────
 #
@@ -47,7 +51,7 @@ services:
   # A SOCKS5 proxy and nothing else. This is what `socksProxy` names.
   anon-a:
     build:
-      context: ./local/anyone/anon-image
+      context: ./local/anon-image
     image: anon-live:v0.4.10.2
     profiles: [anyone]
     init: true
@@ -84,7 +88,7 @@ services:
   # ── The connector's address ────────────────────────────────────────────────
   anon-b:
     build:
-      context: ./local/anyone/anon-image
+      context: ./local/anon-image
     image: anon-live:v0.4.10.2
     profiles: [anyone]
     init: true

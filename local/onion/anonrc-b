@@ -39,12 +39,31 @@ ControlSocket 0
 # a public repository is an address anyone could impersonate.
 HiddenServiceDir /var/lib/anon/hidden_service
 
-# ONE port for BOTH surfaces. `connector-b:3000` is the single listener the
-# connector binds: `GET /ilp/btp` upgrades the peering's websocket and
-# `POST /ilp` serves the client edge A asks claim-state on. An onion address
-# is a host, so it is addressed the way any other host would be -- port 80,
-# and the paths decide the rest.
-HiddenServicePort 80 connector-b:3000
+# ── A FIXED IP, and it has to be ────────────────────────────────────────────
+# `anon` resolves this target when it PARSES its config, not when a stream
+# arrives. A container NAME here aborts the daemon before it ever runs:
+#
+#     [warn] Unparseable address in hidden service port configuration.
+#     free(): invalid size
+#
+# ...because `connector-b` does not exist yet, and cannot: its config names an
+# address only THIS daemon can generate, so `local/keys.sh onion` starts the
+# sidecars first and renders the address into that config afterwards (ADR 0070
+# decision 7). The fixed IP breaks that circle, and `compose.yml` pins
+# `connector-b` to it on the `onion-b` network. (The `free()` abort is an
+# upstream bug in the error path -- the warning above it is the real message.)
+#
+# `local_topologies_load.rs` holds this literal and compose's `ipv4_address` to
+# one string: an IP changed in one file and not the other publishes a
+# descriptor for a port nothing is listening on, which arrives as a circuit
+# that connects and then times out.
+#
+# ONE port for BOTH surfaces. That address is the single listener the connector
+# binds: `GET /ilp/btp` upgrades the peering's websocket and `POST /ilp` serves
+# the client edge A asks claim-state on. An onion address is a host, so it is
+# addressed the way any other host would be -- port 80, and the paths decide
+# the rest.
+HiddenServicePort 80 172.31.0.10:3000
 
 Log notice stdout
 Log notice file /var/lib/anon/notice.log

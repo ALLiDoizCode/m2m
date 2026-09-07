@@ -17,49 +17,53 @@ reach each other, exchanging BTP frames over a circuit. This proves the **client
 edge**: the real payer — a different repository's library, not `connector send`
 — discovering, pricing, and paying this node over one.
 
-They pin **different daemon images on purpose**, and that is the finding this
-topology exists to hold on to.
+Both now run the **same daemon**, [`local/anon-image`](../anon-image/), and that is the
+finding this topology produced.
 
-## The TLD renamed, and the two repositories are on opposite sides of it
+## The TLD renamed, and this repository was on the wrong side of it
 
-Anyone Protocol's `anon` renamed its hidden-service TLD between the releases the
-two repositories pin. Verified on the binaries and then on the wire:
+Anyone Protocol's `anon` renamed its hidden-service TLD between the release this
+repository pinned and the one `toon-client` pins. Verified on the binaries and
+then on the wire:
 
-|                                   | `anon` v0.4.9.7          | `anon` v0.4.10.2                 |
-| --------------------------------- | ------------------------ | -------------------------------- |
-| Pinned by                         | this repo, `local/onion` | `toon-client`, as `ANON_VERSION` |
-| Hidden-service TLD                | `.onion`                 | `.anyone`                        |
-| The other spelling, in the binary | `.anyone` absent         | `.onion` — **0 occurrences**     |
+|                                   | `anon` v0.4.9.7              | `anon` v0.4.10.2                 |
+| --------------------------------- | ---------------------------- | -------------------------------- |
+| Pinned by                         | this repo, until issue #1284 | `toon-client`, as `ANON_VERSION` |
+| Hidden-service TLD                | `.onion`                     | `.anyone`                        |
+| The other spelling, in the binary | `.anyone` absent             | `.onion` — **0 occurrences**     |
 
 v0.4.10.2 writes `<56-base32>.anyone` into `HiddenServiceDir/hostname`, routes
 it, and **refuses the same address spelled `.onion`** (`SOCKS5 … (4)`, host
 unreachable). v0.4.9.7 does the exact opposite.
 
-So the two codebases cannot interoperate over a hidden service:
+So for as long as the two sides pinned different releases they could not
+interoperate over a hidden service: `toon-client` accepted `.anyone` only, and
+this repository `.onion` only — `const ONION_SUFFIX = ".onion"` in
+`connector-config/src/peer.rs`, with `.anyone` appearing nowhere in the tree.
 
-- `toon-client` accepts `.anyone` only, and refuses `.onion` by name.
-- this repository accepts `.onion` only — `const ONION_SUFFIX = ".onion"` in
-  `connector-config/src/peer.rs`, and `.anyone` appears **nowhere** in the repo.
+**That is fixed** ([issue #1284](https://github.com/toon-protocol/connector/issues/1284),
+ADR 0070 as amended). `is_onion_endpoint` now matches a host ending in `.onion`
+**or** `.anyone` — one rule, both spellings, because the exemption a
+hidden-service host carries is earned by the address being an ed25519 key rather
+than by the label after the last dot. `local/onion` runs the same v0.4.10.2
+daemon this topology does.
 
-Neither side is wrong on its own. **This repository is the side that is behind**:
-v0.4.9.7 is from October 2024 and predates the rename. The fix is here — bump
-the sidecar image and widen the suffix check — and until it lands, this topology
-runs the connector with a workaround.
+### The workaround this topology used to need
 
-### The workaround, and why it is not the fix
-
-`connector.toml` sets `peer_allow_plaintext_endpoints = true`. That is what lets
-this node **load and advertise** `http://<addr>.anyone/ilp`, because
+`connector.toml` still sets `peer_allow_plaintext_endpoints = true`, and that is
+now about the **image** rather than about the rule. Before the fix it was what
+let this node load and advertise `http://<addr>.anyone/ilp` at all, because
 
 ```rust
 plaintext_permitted = allow_plaintext || is_onion_endpoint(url)
 ```
 
-and `is_onion_endpoint` does not recognise `.anyone`. It is enough here only
-because the connector **serves** and never dials out over the overlay, so the
-other thing that function decides — which socket a dial leaves on — is never
-asked. It does **not** make this connector able to reach a `.anyone` peer, and
-it is a loopback-and-test switch that must never be set on a deployed node.
+and `is_onion_endpoint` did not recognise `.anyone`. The default image below is
+a **released** one that predates the fix, so the line stays until this topology
+pins a release that carries it — drop it in the same change that bumps
+`ANYONE_CONNECTOR_IMAGE`. It is a loopback-and-test switch that must never be
+set on a deployed node, and on a node with the fix an onion-only config needs
+nothing of the kind.
 
 ## Use a released connector image, not `main`
 
@@ -124,7 +128,7 @@ the daemon can generate, so the daemon must start first. `anonrc-b` names a
 **fixed IP** instead, and `compose.yml` pins the connector to it.
 
 **No image is published for v0.4.10.2** — ghcr's `ator-protocol` tags stop at
-v0.4.9.7. `anon-image/` builds one by overlaying the official release binary
+v0.4.9.7. `../anon-image/` builds one by overlaying the official release binary
 (sha256-verified, the same figure `toon-client` records) onto that image. The
 binary is statically linked, so nothing else has to come with it.
 

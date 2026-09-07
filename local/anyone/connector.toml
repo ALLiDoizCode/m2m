@@ -10,23 +10,26 @@
 client_edge_addr = "0.0.0.0:3000"
 state_dir        = "/app/state"
 
-# ── Why this opt-in is here, and why it is a WORKAROUND ─────────────────────
+# ── Why this opt-in is still here: the IMAGE, not the rule ──────────────────
 # The `[node]` endpoints below are plaintext (`http://`, `ws://`) at a `.anyone`
-# host. ADR 0070's exemption -- a hidden-service address authenticates itself,
-# so plaintext needs no opt-in -- keys on the `.onion` suffix ONLY
-# (`ONION_SUFFIX`, connector-config/src/peer.rs). This connector does not know
-# the string `.anyone`, so it does not recognise these as self-authenticating
-# and would refuse them.
+# host, and ADR 0070's exemption -- a hidden-service address authenticates
+# itself, so plaintext needs no opt-in -- now covers them: `is_onion_endpoint`
+# matches `.onion` AND `.anyone` (issue #1284, ADR 0070 as amended). On a
+# connector built from this tree, this line is unnecessary.
 #
-# `plaintext_permitted = allow_plaintext || is_onion_endpoint`, so the node-wide
-# opt-in is what lets them load. That is enough for this topology because the
-# connector only ever SERVES here -- it never dials out over the overlay, so
-# `is_onion_endpoint`'s other job (choosing the SOCKS socket) is never asked.
+# It stays because the image this topology runs by default is a RELEASED one
+# that predates the fix (see compose.yml: `main` is ahead of what toon-client
+# has vendored, so a build of main is refused at the packet layer for an
+# unrelated reason). On that binary the suffix check is `.onion` only, and
+# `plaintext_permitted = allow_plaintext || is_onion_endpoint` is what lets
+# these endpoints load at all. It is enough only because the connector SERVES
+# here and never dials out over the overlay, so the other thing that function
+# decides -- which socket a dial leaves on -- is never asked.
 #
-# It is the harness standing in for the one-line change this repository needs:
-# widen the suffix check to accept `.anyone` and bump the sidecar image. Do NOT
-# read this line as a pattern for a deployed node -- it is a loopback-and-test
-# switch and it means every plaintext endpoint loads, not just this one.
+# DELETE THIS LINE in the same change that bumps ANYONE_CONNECTOR_IMAGE to a
+# release carrying the fix. Do NOT read it as a pattern for a deployed node:
+# it is a loopback-and-test switch and it means every plaintext endpoint
+# loads, not just this one.
 peer_allow_plaintext_endpoints = true
 
 [signer]

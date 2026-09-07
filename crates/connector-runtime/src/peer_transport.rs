@@ -21,11 +21,11 @@
 /// Why an onion endpoint cannot be dialed on a node that configured no
 /// `socks_proxy` (ADR 0070 decision 3).
 ///
-/// A dial failure and nothing more exotic: a `.onion` name resolves nowhere
-/// without a proxy to resolve it, so this reads like every other "could not
-/// reach that host", and packets routed to the peer reject `T01` with the
-/// peer and the endpoint named -- never `T00` and never a silent drop
-/// (`peer-carriage-spec.md` §2.2).
+/// A dial failure and nothing more exotic: a `.onion` or `.anyone` name
+/// resolves nowhere without a proxy to resolve it, so this reads like every
+/// other "could not reach that host", and packets routed to the peer reject
+/// `T01` with the peer and the endpoint named -- never `T00` and never a
+/// silent drop (`peer-carriage-spec.md` §2.2).
 ///
 /// **One string, shared by both carriages**, because `peer-carriage-spec.md`
 /// §9 holds that peer behaviour an operator can observe on one carriage and
@@ -33,8 +33,9 @@
 /// reach an onion peer" is exactly such a behaviour. The two carriage crates
 /// do not depend on each other, but both depend on this one, so this is
 /// where a sentence they must not diverge on belongs.
-pub const NO_SOCKS_PROXY: &str = "the endpoint's host ends in .onion and this node configured no \
-     socks_proxy, so there is nothing that can resolve or reach it (ADR 0070 decision 3)";
+pub const NO_SOCKS_PROXY: &str =
+    "the endpoint's host ends in .onion or .anyone and this node configured no socks_proxy, so \
+     there is nothing that can resolve or reach it (ADR 0070 decision 3)";
 
 use std::collections::HashMap;
 use std::sync::Arc;

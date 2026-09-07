@@ -204,16 +204,19 @@ One connector image, real containerised chains, a real packet. It is a **separat
 `connector.toml`, mounted key files and a real volume at `/app/state` — boots and moves a
 packet. That is this, and only this.
 
-| Topology       | Nodes | What it proves                                                                                                                                              |
-| -------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `solo/`        | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its route.                     |
-| `two-hop/`     | 2     | Two images peered over ILP-over-HTTP on anvil. B prices the route it terminates; A covers each crossing with a real EIP-712 claim on a real funded channel. |
-| `mixed-chain/` | 3     | A↔B on EVM over BTP, B↔C on Solana over ILP-over-HTTP, B holding both backends. One packet crosses two chains and two carriages.                            |
-| `onion/`       | 2     | B reachable only at a `.onion` address a real `anon` sidecar generates, the two on separate docker networks with no route between them. Not on the CI gate. |
+| Topology       | Nodes | What it proves                                                                                                                                                                                         |
+| -------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `solo/`        | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its route.                                                                |
+| `two-hop/`     | 2     | Two images peered over ILP-over-HTTP on anvil. B prices the route it terminates; A covers each crossing with a real EIP-712 claim on a real funded channel.                                            |
+| `mixed-chain/` | 3     | A↔B on EVM over BTP, B↔C on Solana over ILP-over-HTTP, B holding both backends. One packet crosses two chains and two carriages.                                                                       |
+| `onion/`       | 2     | B reachable only at a hidden-service address a real `anon` sidecar generates, the two on separate docker networks with no route between them. Not on the CI gate.                                      |
+| `anyone/`      | 1     | The **client edge** over the same overlay: `toon-client` — a different repository's payer — discovering, pricing and paying this node over a circuit. Needs that repository built; not on the CI gate. |
 
 `LOCAL_TOPOLOGY` picks one (`solo` is the default); `make local-verify` runs the cycle and
 `.github/workflows/local-topologies.yml` runs the first three — `onion` needs a third-party
-anonymity network and is deliberately off that gate (ADR 0070). The peered topologies cross more than
+anonymity network and is deliberately off that gate (ADR 0070), and `anyone` is run by its own
+`run.sh` rather than by `LOCAL_TOPOLOGY` at all. `anon-image/` builds the daemon both of those
+run: ghcr publishes none for the release whose hidden-service TLD is `.anyone` (issue #1284). The peered topologies cross more than
 once and then read the payee's own claim journal, because a peer claim's verdict rides back
 out of band and never gates the packet — `--expect-fulfill` alone would go green over a
 peering carrying traffic for free. `local/README.md` is the long version and is worth reading

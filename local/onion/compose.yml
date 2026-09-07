@@ -25,7 +25,7 @@
 #     each other -- docker installs the isolation rules that drop it -- and
 #     docker's embedded DNS is PER NETWORK, so `connector-a` cannot resolve
 #     the name `connector-b` either. The peering's endpoint is the only name
-#     it has for that node, and that name is a `.onion` one.
+#     it has for that node, and that name is a hidden-service one.
 #   * `anvil` joins BOTH, because both nodes settle on it. A container on two
 #     bridges is not a router: it forwards nothing between them (`ip_forward`
 #     is off inside its own network namespace and nothing routes back), so
@@ -54,12 +54,23 @@
 # renders the committed `local/onion/*.toml` into
 # `local/.keys/onion/<node>/connector.toml` with the placeholder substituted.
 # THAT RENDERED FILE IS WHAT THE MOUNTS BELOW NAME. The committed ones are
-# still real configs that load -- a placeholder ends in `.onion` too -- which
+# still real configs that load -- a placeholder ends in `.anyone` too -- which
 # is what keeps `local_topologies_load.rs` able to read them.
+#
+# ── `.anyone`, not `.onion` ──────────────────────────────────────────────────
+#
+# The daemon above writes `<56-base32>.anyone`, because upstream renamed the
+# hidden-service TLD and this topology now runs the release that did (issue
+# #1284). The committed placeholders are spelled the same way, so the file an
+# operator reads names the TLD the daemon they run will actually generate. The
+# connector accepts BOTH spellings -- one suffix rule, `is_onion_endpoint`,
+# ADR 0070 as amended -- so the older daemon still peers; what it cannot do is
+# reach a node published by the newer one, which is a property of the network
+# rather than of any config here.
 #
 # ── BTP, deliberately ────────────────────────────────────────────────────────
 #
-# The peering is `ws://<addr>.onion/ilp/btp`. The HTTP carriage asks its own
+# The peering is `ws://<addr>.anyone/ilp/btp`. The HTTP carriage asks its own
 # client for a proxy and gets one; the websocket library the BTP carriage
 # speaks has no proxy support at all, so its onion path builds a SOCKS5 stream
 # itself and hands the established stream to the websocket client. That is the
@@ -74,7 +85,13 @@ services:
   # A SOCKS5 proxy and nothing else: `anonrc-a` opens no ORPort and publishes
   # no service. `connector-a`'s one `socks_proxy` key names this container.
   anon-a:
-    image: ghcr.io/anyone-protocol/ator-protocol:v0.4.9.7
+    # BUILT, not pulled (issue #1284). ghcr publishes no image for the daemon
+    # release whose hidden-service TLD is `.anyone`, so `local/anon-image`
+    # overlays the official binary onto the last image it does publish. The
+    # same image serves `local/anyone`; one pinned version, one place.
+    build:
+      context: ./local/anon-image
+    image: anon-live:v0.4.10.2
     profiles: [onion]
     init: true
     volumes:
@@ -113,8 +130,14 @@ services:
   # the volume with everything else, which is not the same thing: the address
   # is re-read and re-rendered on the next bring-up, and no committed file
   # names it.
+  # Its `HiddenServicePort` names `connector-b` by a FIXED IP rather than by
+  # service name, and that is forced: `anon` resolves that target when it
+  # parses its config, and this daemon starts before `connector-b` exists.
+  # See anonrc-b.
   anon-b:
-    image: ghcr.io/anyone-protocol/ator-protocol:v0.4.9.7
+    build:
+      context: ./local/anon-image
+    image: anon-live:v0.4.10.2
     profiles: [onion]
     init: true
     volumes:
@@ -158,7 +181,7 @@ services:
         max-size: '10m'
         max-file: '3'
 
-  # ── B: the accepting half, reachable only at its .onion address ────────────
+  # ── B: the accepting half, reachable only at its hidden-service address ────
   connector-b:
     image: connector-rust:local
     profiles: [onion]
@@ -175,7 +198,14 @@ services:
       # uid 10001 so a fresh named volume inherits that ownership. A host bind
       # mount arrives root-owned and the connector refuses to start.
       - onion-b-state:/app/state
-    networks: [onion-b]
+    networks:
+      onion-b:
+        # FIXED, because `anon-b`'s HiddenServicePort names this address and
+        # resolves it when it PARSES its config -- long before this container
+        # exists. It cannot name `connector-b` instead: the daemon has to start
+        # first, since this node's config carries an address only that daemon
+        # can generate. See anonrc-b.
+        ipv4_address: 172.31.0.10
     # NO `ports`. Every other topology here publishes its connectors' client
     # edges to loopback; this one deliberately does not for B, because the
     # claim this topology makes is that the circuit is the only way in.
@@ -258,7 +288,7 @@ services:
   # the circuit. That is what `--socks-proxy` is doing here, and it is the same
   # host-selected rule applied to two URLs independently (ADR 0070 decision 5):
   # `--operator` names a container on this network and goes direct, `--seal-to`
-  # names a `.onion` host and goes through `anon-a`.
+  # names a hidden-service host and goes through `anon-a`.
   #
   # TWO CROSSINGS, then the payee's own claim journal, exactly as `two-hop`
   # does and for the same two reasons. A peer claim's verdict rides back in
@@ -310,7 +340,11 @@ services:
         # literal in this file is what makes the sender seal to the same node
         # the payer dials: two copies of an address that is generated fresh on
         # every bring-up would be one copy too many.
-        SEAL_TO=$$(sed -n 's|^client_edge_url = "\(http://[a-z2-7]*\.onion/ilp\)"$$|\1|p' \
+        # The TLD is matched as [a-z]* rather than spelled out: `anon`
+        # renamed it (issue #1284) and a pattern naming one spelling would
+        # silently match nothing on a daemon that writes the other, leaving
+        # SEAL_TO empty and the failure two steps from its cause.
+        SEAL_TO=$$(sed -n 's|^client_edge_url = "\(http://[a-z2-7]*\.[a-z]*/ilp\)"$$|\1|p' \
           /app/data/connector.toml | head -1)
         if [ -z "$$SEAL_TO" ]; then
           echo "A's rendered config names no onion client edge, so local/keys.sh never" >&2
@@ -440,6 +474,12 @@ networks:
   # of this topology.
   onion-a:
   onion-b:
+    ipam:
+      config:
+        # Pinned so anonrc-b's HiddenServicePort can name an address in it.
+        # A different /16 from local/anyone's, so a stack left up in one
+        # checkout does not make the other's network un-creatable.
+        - subnet: 172.31.0.0/16
 
 volumes:
   onion-a-state:

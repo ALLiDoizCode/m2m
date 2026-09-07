@@ -74,13 +74,14 @@ const PACKETS_PATH: &str = "/packets";
 /// Why an onion URL cannot be dialed by an invocation that passed no
 /// `--socks-proxy` (ADR 0070 decision 5).
 ///
-/// An ordinary dial failure and nothing more exotic: a `.onion` name
-/// resolves nowhere without a proxy to resolve it, so this reads like every
+/// An ordinary dial failure and nothing more exotic: a `.onion` or
+/// `.anyone` name resolves nowhere without a proxy to resolve it, so this
+/// reads like every
 /// other "could not reach that host" -- and it is raised *before* any lookup,
 /// so the operator is not handed a resolver error about a name that is
 /// spelled correctly and that nothing here should have looked up.
-const NO_SOCKS_PROXY: &str = "the URL's host ends in .onion and this invocation passed no \
-     --socks-proxy, so there is nothing that can resolve or reach it. Pass \
+const NO_SOCKS_PROXY: &str = "the URL's host ends in .onion or .anyone and this invocation \
+     passed no --socks-proxy, so there is nothing that can resolve or reach it. Pass \
      '--socks-proxy socks5h://<host>:<port>' naming a SOCKS5 proxy onto that network (ADR 0070 \
      decision 5)";
 
@@ -756,6 +757,37 @@ mod tests {
             vec![onion_target()],
             "the fetch reached the proxy, and reached it as a name -- `socks5h` defers \
              resolution to the proxy because no resolver here can resolve a .onion"
+        );
+    }
+
+    /// The **other spelling** of a hidden-service host takes the same path
+    /// (issue #1284).
+    ///
+    /// `anon` renamed the TLD it publishes and routes between v0.4.9.7
+    /// (`.onion`) and v0.4.10.2 (`.anyone`), and neither release resolves
+    /// the other's. `connector send` is how an operator probes such a node,
+    /// so a flag that reached one spelling and not the other would send the
+    /// probe direct, to a name no resolver here can answer for.
+    #[tokio::test]
+    async fn an_anyone_seal_to_is_fetched_through_the_proxy_too() {
+        const ANYONE_HOST: &str = "toonexampleconnectoraddress234567abcdefghijklmnopqrstuvw.anyone";
+        let proxy = Socks5TestServer::spawn_recording_only().await;
+
+        let failed = fetch_identity(
+            &format!("http://{ANYONE_HOST}/ilp"),
+            Some(&proxy.proxy_url()),
+        )
+        .await;
+
+        assert!(
+            failed.is_err(),
+            "the proxy routes nothing, so the fetch cannot succeed: {failed:?}"
+        );
+        assert_eq!(
+            proxy.targets(),
+            vec![format!("{ANYONE_HOST}:80")],
+            "a `.anyone` host is selected by the same rule `.onion` is: one function \
+             (`is_onion_endpoint`) asked, never a second list of suffixes"
         );
     }
 

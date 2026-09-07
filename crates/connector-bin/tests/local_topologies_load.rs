@@ -60,6 +60,25 @@ const ONION_COMPOSE: &str = include_str!("../../../local/onion/compose.yml");
 const ONION_ANONRC_A: &str = include_str!("../../../local/onion/anonrc-a");
 const ONION_ANONRC_B: &str = include_str!("../../../local/onion/anonrc-b");
 
+/// The `anon` sidecar's image, BUILT here rather than pulled: ghcr publishes
+/// none for the release whose hidden-service TLD is `.anyone` (issue #1284).
+/// Read as text for the one fact no config can hold -- which daemon release
+/// this repository's hidden-service topologies actually run.
+const ANON_IMAGE_DOCKERFILE: &str = include_str!("../../../local/anon-image/Dockerfile");
+
+/// The daemon release both hidden-service topologies pin, and the TLD it
+/// writes. Held in one place here because the two halves live in four files:
+/// the Dockerfile that builds it, the two composes that name the built tag,
+/// and the placeholder every committed onion config carries.
+const ANON_VERSION: &str = "v0.4.10.2";
+const ANON_TLD: &str = ".anyone";
+
+/// The address `connector-b` is pinned to on `onion-b`, and the target
+/// `anonrc-b` publishes its hidden service at. One fact in two files,
+/// because `anon` resolves that target when it parses its config -- see
+/// [`the_onion_sidecars_agree_to_the_terms_and_persist_the_hidden_service`].
+const ONION_B_ADDR: &str = "172.31.0.10";
+
 /// The operator-facing guide to this directory, and the workflow that runs
 /// three of the four topologies in it. Read as text by
 /// [`the_onion_topology_is_deliberately_not_on_the_ci_gate`], which is the one
@@ -1373,9 +1392,13 @@ fn onion_service(service: &str) -> &'static str {
 
 /// The placeholder the committed configs carry where the daemon's address
 /// goes, and the reason a placeholder is legitimate here at all: it still
-/// ends in `.onion`, so the committed files load through the real parser and
-/// mean something to every other test in this file.
-const ONION_PLACEHOLDER: &str = "placeholderplaceholderplaceholderplaceholderplaceholderb.onion";
+/// ends in a hidden-service suffix, so the committed files load through the
+/// real parser and mean something to every other test in this file.
+///
+/// `.anyone` rather than `.onion` because that is the TLD the daemon this
+/// topology builds actually writes (issue #1284) -- held to the image pin by
+/// [`the_onion_sidecar_is_the_daemon_that_writes_the_placeholders_tld`].
+const ONION_PLACEHOLDER: &str = "placeholderplaceholderplaceholderplaceholderplaceholderb.anyone";
 
 #[test]
 fn the_onion_topologys_committed_configs_load() {
@@ -1571,8 +1594,8 @@ fn the_onion_topology_commits_a_placeholder_and_mounts_what_keys_sh_renders() {
             raw.contains(ONION_PLACEHOLDER),
             "{name} must carry the placeholder host `{ONION_PLACEHOLDER}` where the daemon's \
              address goes. It is committed as a placeholder because the address does not exist \
-             until `anon` has run -- and it still ends in `.onion`, which is what lets this file \
-             load these bytes through the real parser."
+             until `anon` has run -- and it still ends in a hidden-service suffix, which is what \
+             lets this file load these bytes through the real parser."
         );
     }
     assert!(
@@ -1618,6 +1641,72 @@ fn the_onion_topology_commits_a_placeholder_and_mounts_what_keys_sh_renders() {
     );
 }
 
+/// **The sidecar is the daemon that writes the TLD the placeholders are
+/// spelled in** (issue #1284).
+///
+/// `anon` renamed its hidden-service TLD between v0.4.9.7 (`.onion`) and
+/// v0.4.10.2 (`.anyone`), and the rename is total in both directions:
+/// neither release resolves the other's spelling. So the placeholder's
+/// suffix and the pinned daemon are one fact held in two files, and a
+/// disagreement between them is invisible until bring-up -- `local/keys.sh`
+/// reads an address whose TLD its own regex refuses, or worse renders a
+/// config that loads and names a host no circuit reaches.
+///
+/// The connector accepts BOTH suffixes (`is_onion_endpoint`, ADR 0070 as
+/// amended), which is exactly why this has to be asserted here rather than
+/// left to the parser: a placeholder at the wrong TLD would still load.
+#[test]
+fn the_onion_sidecar_is_the_daemon_that_writes_the_placeholders_tld() {
+    assert!(
+        ONION_PLACEHOLDER.ends_with(ANON_TLD),
+        "the committed placeholder must be spelled in the TLD the pinned daemon writes \
+         ({ANON_TLD}), or the operator step local/keys.sh automates renders an address the \
+         daemon beside it cannot resolve"
+    );
+    assert!(
+        ANON_IMAGE_DOCKERFILE.contains(&format!("ARG ANON_VERSION={ANON_VERSION}")),
+        "local/anon-image/Dockerfile must pin {ANON_VERSION} -- the release that writes \
+         {ANON_TLD}. It is BUILT rather than pulled because ghcr's ator-protocol tags stop at \
+         v0.4.9.7, which predates the rename."
+    );
+    assert!(
+        ANON_IMAGE_DOCKERFILE.contains("sha256sum -c -"),
+        "and it must verify the download before running it: an unverified binary fetched over \
+         the network is not a pin"
+    );
+    assert!(
+        ANON_IMAGE_DOCKERFILE.contains("anon --version | grep -q \"0.4.10.2\""),
+        "the BUILD must fail on the wrong release rather than the first bring-up -- a daemon \
+         speaking the other TLD comes up healthy and publishes an address nothing here expects"
+    );
+
+    for service in ["anon-a", "anon-b"] {
+        let block = onion_service(service);
+        assert!(
+            block.contains("context: ./local/anon-image"),
+            "`{service}` must build local/anon-image. One Dockerfile for both hidden-service \
+             topologies: a second copy is a second version to drift."
+        );
+        assert!(
+            block.contains(&format!("image: anon-live:{ANON_VERSION}")),
+            "`{service}` must tag the built image with the version it is, so a stale image on \
+             a developer's machine is one `docker image rm` away from being named"
+        );
+    }
+    assert!(
+        !ONION_COMPOSE.contains("ator-protocol:v0.4.9.7"),
+        "the published pre-rename image must not come back: it routes `.onion` and does not \
+         contain the string `.anyone`, so a node under it publishes an address `toon-client` \
+         refuses (issue #1284)"
+    );
+
+    assert!(
+        KEYS_SCRIPT.contains(&format!("{{56}}\\{ANON_TLD}$")),
+        "local/keys.sh must validate the address it reads back at the SAME TLD, or a daemon \
+         from the wrong side of the rename is accepted silently and rendered into both configs"
+    );
+}
+
 /// **No route between the connectors** (ADR 0070's Consequences, issue #1279).
 ///
 /// A fulfilled packet proves nothing about the circuit and a SOCKS dial that
@@ -1634,7 +1723,6 @@ fn each_onion_connector_is_on_its_own_network_with_no_route_to_the_other() {
         ("connector-a", "onion-a"),
         ("anon-a", "onion-a"),
         ("sender", "onion-a"),
-        ("connector-b", "onion-b"),
         ("anon-b", "onion-b"),
         ("stub-app", "onion-b"),
     ] {
@@ -1646,6 +1734,22 @@ fn each_onion_connector_is_on_its_own_network_with_no_route_to_the_other() {
              exists to make impossible."
         );
     }
+    // `connector-b` makes the same claim in the long form, because it carries
+    // a fixed address there (anon-b's HiddenServicePort resolves its target at
+    // config-parse time, so it cannot name a container). Asserted as "names
+    // that network, and never the other one" rather than by matching the short
+    // form, which this service no longer uses.
+    let payee = onion_service("connector-b");
+    assert!(
+        payee.contains("\n      onion-b:\n"),
+        "`connector-b` must be on `onion-b`, written in the long form its `ipv4_address` needs"
+    );
+    assert!(
+        !payee.contains("onion-a"),
+        "and never on `onion-a`. Docker does not route between two user-defined bridge networks \
+         and its embedded DNS is per network, so a connector-b on both would hand this topology \
+         the direct dial it exists to make impossible."
+    );
     assert!(
         onion_service("anvil").contains("networks: [onion-a, onion-b]"),
         "`anvil` is the one service on both networks, because both nodes settle on it. A \
@@ -1720,10 +1824,33 @@ fn the_onion_sidecars_agree_to_the_terms_and_persist_the_hidden_service() {
          the address is new on every start"
     );
     assert!(
-        ONION_ANONRC_B.contains("HiddenServicePort 80 connector-b:3000"),
+        ONION_ANONRC_B.contains(&format!("HiddenServicePort 80 {ONION_B_ADDR}:3000")),
         "ONE onion port for BOTH surfaces: `GET /ilp/btp` carries the peering and `POST /ilp` \
          serves the client edge A asks claim-state on, and they are the same listener. An onion \
          address is a host, so it is addressed like one."
+    );
+    // ...and addressed by IP rather than by container name, which is not a
+    // style choice. `anon` resolves this target when it PARSES its config,
+    // and a name it cannot resolve aborts the daemon before it runs -- which
+    // is exactly the state this topology starts in, because the daemon has to
+    // run before the connector's config can name the address it generates.
+    assert!(
+        !ONION_ANONRC_B.contains("connector-b:3000"),
+        "anonrc-b must NOT name `connector-b` as its HiddenServicePort target: local/keys.sh \
+         starts the sidecars before that container exists, and `anon` resolves this target at \
+         config-parse time -- it dies on the name rather than waiting for it (issue #1284)"
+    );
+    assert!(
+        onion_service("connector-b").contains(&format!("ipv4_address: {ONION_B_ADDR}")),
+        "and compose must pin `connector-b` to {ONION_B_ADDR}, or the descriptor anon-b \
+         publishes points at an address nothing is listening on -- a circuit that connects and \
+         then times out, two steps from its cause"
+    );
+    assert!(
+        ONION_COMPOSE.contains("subnet: 172.31.0.0/16"),
+        "the `onion-b` network needs a pinned subnet for that address to be in, and it must not \
+         be local/anyone's: two stacks that cannot both create their networks is a failure with \
+         no connection to anything either one is testing"
     );
     assert!(
         ONION_ANONRC_A.contains("SocksPort 0.0.0.0:9050"),

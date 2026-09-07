@@ -88,7 +88,7 @@ up)
     echo "ERROR: anon-b has not produced a v3 .anyone address." >&2
     echo "       Got: '${addr:-<nothing>}'" >&2
     echo "       An address ending in .onion means the image is anon v0.4.9.7 --" >&2
-    echo "       this topology needs v0.4.10.2, which anon-image/ builds. A daemon" >&2
+    echo "       this topology needs v0.4.10.2, which local/anon-image builds. A daemon" >&2
     echo "       that exited immediately usually means AgreeToTerms is missing." >&2
     echo "       'docker compose logs anon-b' says which." >&2
     exit 1

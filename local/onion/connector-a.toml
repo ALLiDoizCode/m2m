@@ -13,12 +13,17 @@
 # SOCKS dial that silently fell back to a direct connection would go green.
 # Here there is nothing to fall back to.
 #
-# THE .onion HOST BELOW IS A PLACEHOLDER (ADR 0070 decision 7). The daemon
+# THE .anyone HOST BELOW IS A PLACEHOLDER (ADR 0070 decision 7). The daemon
 # generates the real address and the operator copies it into the dialing node's
 # peer `endpoint`; `local/keys.sh onion` does that copying and renders the
 # result into `local/.keys/onion/connector-a/connector.toml`, which is what
 # compose mounts. See `connector-b.toml`'s header for the whole of that
 # arrangement.
+#
+# `.anyone` rather than `.onion` because that is what the sidecar this topology
+# runs writes: `anon` renamed its hidden-service TLD, and `local/anon-image`
+# pins the release that did (issue #1284). The connector takes either spelling
+# -- one suffix rule, `is_onion_endpoint` -- so nothing below turns on which.
 # =============================================================================
 
 client_edge_addr = "0.0.0.0:3000"
@@ -37,20 +42,21 @@ state_dir = "/app/state"
 #
 # `socks5h`, and the `h` is not a preference: `socks5://` resolves the host
 # NAME locally before dialing and no resolver on this machine can resolve a
-# `.onion` one, so a node that started with one would come up clean and then
-# fail every onion dial for a reason nothing in its log explains. `Config::load`
-# refuses the other scheme by name.
+# hidden-service one, so a node that started with one would come up clean and
+# then fail every onion dial for a reason nothing in its log explains.
+# `Config::load` refuses the other scheme by name.
 #
 # ONE key, and no per-peer twin. Which dials take it is read off each
-# endpoint's own host: `.onion` goes through here, everything else goes direct
+# endpoint's own host: `.onion` and `.anyone` go through here, everything else
+# goes direct
 # -- which is why `[settlement.evm] rpc_url` below needs no exemption written
 # anywhere and gets none.
 socks_proxy = "socks5h://anon-a:9050"
 
 # `peer_allow_plaintext_endpoints` is deliberately ABSENT, and its absence is
 # part of what this topology proves. Every plaintext URL below sits at a
-# `.onion` host, and ADR 0070 decision 2 permits the plaintext schemes there
-# independently of that switch -- a v3 onion address IS the ed25519 key the
+# hidden-service host, and ADR 0070 decision 2 permits the plaintext schemes
+# there independently of that switch -- a v3 onion address IS the ed25519 key the
 # circuit is authenticated to, which is a stronger binding than a CA-issued
 # certificate for a DNS name, so ADR 0004's requirement is satisfied by a
 # different mechanism rather than waived.
@@ -122,7 +128,7 @@ price = 1200
 # the 200 in the arithmetic above.
 [[peers]]
 id = "a-b"
-endpoint = "ws://placeholderplaceholderplaceholderplaceholderplaceholderb.onion/ilp/btp"
+endpoint = "ws://placeholderplaceholderplaceholderplaceholderplaceholderb.anyone/ilp/btp"
 fee = 200
 
 # P2 (§1.2): the channel this relation's claims are judged against, and the
@@ -172,7 +178,7 @@ peer_id = "a-b"
 channel_id = "0x339280164c007798a2c4ba9e7752d542dccd586866c53937f41f29702cbae801"
 chain_id = 31337
 token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
-client_edge_url = "http://placeholderplaceholderplaceholderplaceholderplaceholderb.onion/ilp"
+client_edge_url = "http://placeholderplaceholderplaceholderplaceholderplaceholderb.anyone/ilp"
 
 # ── Operator surface (ADR 0008) ──────────────────────────────────────────────
 # Only this node has one, because only this node is sent to: `connector send`
@@ -186,10 +192,10 @@ bearer_token_file = "/app/data/operator-bearer-token"
 write_keys_file = "/app/data/operator-write-keys"
 
 # ── Settlement: EVM only ─────────────────────────────────────────────────────
-# DIRECT, and named here rather than exempted: `rpc_url` is not a `.onion`
-# host, so the host-selected rule sends it to the direct client without any
-# key saying so (ADR 0070 decision 4). Routing settlement through a circuit is
-# a separate decision with its own evidence to gather.
+# DIRECT, and named here rather than exempted: `rpc_url` is not a
+# hidden-service host, so the host-selected rule sends it to the direct client
+# without any key saying so (ADR 0070 decision 4). Routing settlement through
+# a circuit is a separate decision with its own evidence to gather.
 #
 # `contract_address` is the TokenNetworkRegistry, NOT a TokenNetwork:
 # `EvmSettlementBackend::connect` resolves `getTokenNetwork(token_address)`

@@ -808,28 +808,38 @@ mod tests {
     /// Read through the same `is_onion_endpoint` the carriage rule reads,
     /// so the two cannot disagree about a host -- and, as there, the suffix
     /// is a suffix: a host that only looks onion is still plaintext.
+    /// Both spellings the `anon` daemon has published (issue #1284), for
+    /// the reason the carriage rule takes both: what a payee writes here is
+    /// whatever its own daemon generated, and this node has no say in which
+    /// release that was.
     #[test]
     fn an_onion_client_edge_url_needs_no_plaintext_opt_in() {
-        const ONION: &str =
-            "http://vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion/ilp";
+        const HIDDEN_SERVICE_URLS: [&str; 2] = [
+            "http://vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion/ilp",
+            "http://vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.anyone/ilp",
+        ];
 
-        for row in [evm("relay", CHANNEL), solana("relay", ACCOUNT)] {
-            let row = with_client_edge_url(row, ONION);
-            let channels = resolve_pay_channels(vec![row], false, both_chains())
-                .expect("an onion client edge loads on a node that opted into nothing");
-            assert_eq!(channels[0].client_edge_url().as_str(), ONION);
+        for url in HIDDEN_SERVICE_URLS {
+            for row in [evm("relay", CHANNEL), solana("relay", ACCOUNT)] {
+                let row = with_client_edge_url(row, url);
+                let channels = resolve_pay_channels(vec![row], false, both_chains())
+                    .expect("an onion client edge loads on a node that opted into nothing");
+                assert_eq!(channels[0].client_edge_url().as_str(), url);
+            }
         }
 
-        for row in [evm("relay", CHANNEL), solana("relay", ACCOUNT)] {
-            let row = with_client_edge_url(row, "http://onion.example/ilp");
-            assert!(
-                matches!(
-                    resolve_pay_channels(vec![row], false, both_chains()),
-                    Err(ConfigError::PayChannelClientEdgeUrlScheme { ref scheme, .. })
-                        if scheme == "http"
-                ),
-                "a host that merely contains the word is an ordinary clearnet host"
-            );
+        for url in ["http://onion.example/ilp", "http://anyone.example/ilp"] {
+            for row in [evm("relay", CHANNEL), solana("relay", ACCOUNT)] {
+                let row = with_client_edge_url(row, url);
+                assert!(
+                    matches!(
+                        resolve_pay_channels(vec![row], false, both_chains()),
+                        Err(ConfigError::PayChannelClientEdgeUrlScheme { ref scheme, .. })
+                            if scheme == "http"
+                    ),
+                    "{url}: a host that merely contains the word is an ordinary clearnet host"
+                );
+            }
         }
     }
 
