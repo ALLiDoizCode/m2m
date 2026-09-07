@@ -283,18 +283,25 @@ Because the binary and a box's bind-mounted TOML are a matched pair in both
 directions, adding a required config key is a **breaking deploy** wherever that pair
 lives — for relay and store, that discipline is now each node repo's own to keep.
 
-An **onion endpoint** is a host, not a carriage (ADR 0070). A peer `endpoint` whose
-host ends in `.onion` selects BTP on `ws://` and ILP-over-HTTP on `http://`, needs
-**no** `peer_allow_plaintext_endpoints` (that switch keeps its old meaning and scope),
-and is dialed through the one root-level `socks_proxy` key — `socks5h://` only, refused
-by name otherwise, because a `socks5://` proxy resolves locally and no local resolver
-resolves a `.onion` name. Which dials take the proxy is read off the endpoint's host,
+An **onion endpoint** is a host, not a carriage (ADR 0070, amended by #1284). A peer
+`endpoint` whose host ends in `.onion` **or `.anyone`** selects BTP on `ws://` and
+ILP-over-HTTP on `http://`, needs **no** `peer_allow_plaintext_endpoints` (that switch
+keeps its old meaning and scope), and is dialed through the one root-level `socks_proxy`
+key — `socks5h://` only, refused by name otherwise, because a `socks5://` proxy resolves
+locally and no local resolver resolves a hidden-service name. There are two spellings
+because `anon` renamed the TLD it publishes between v0.4.9.7 and v0.4.10.2 and neither
+release resolves the other's; the connector takes either, since the exemption is earned
+by the address being an ed25519 key rather than by the label after the last dot, and the
+`local/` topologies run the newer daemon — built by `local/anon-image`, because ghcr
+publishes no image for it. Which dials take the proxy is read off the endpoint's host,
 so there is no per-peer proxy key and nothing to keep in sync. The host rule has
 **one** implementation, `connector_config::is_onion_endpoint`; do not write a second.
 `PeerCarriage` stays two-valued — ADR 0070's own falsifier is that no
 `PeerCarriage::Onion` exists. Settlement RPC and a route's `handler_url` are **not**
 proxied, on purpose (decision 4), and the operational half — the daemon's
-terms-acceptance flag, and its `HiddenServiceDir` on a persisted volume — is
+terms-acceptance flag, its `HiddenServiceDir` on a persisted volume, and the fact that
+`HiddenServicePort`'s target is resolved when the daemon _parses_ its config, so an
+unresolvable container name crashes it before it runs — is
 `docs/operators/onion-endpoint-bringup.md`, not the connector's.
 
 ## Pointers

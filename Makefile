@@ -218,8 +218,8 @@ LOCAL_NODES_two-hop := connector-a connector-b
 LOCAL_NODES_mixed-chain := connector-a connector-b connector-c
 # `onion` names its two connectors and NOT its two `anon` sidecars, and that is
 # not an omission: local/keys.sh starts those itself, before this list is used,
-# because the .onion address they generate has to be rendered into the configs
-# these two are about to mount (ADR 0070 decision 7). They are still waited on
+# because the hidden-service address they generate has to be rendered into the
+# configs these two are about to mount (ADR 0070 decision 7). They are still waited on
 # -- each connector `depends_on` its own daemon's health gate.
 LOCAL_NODES_onion := connector-a connector-b
 LOCAL_NODES = $(LOCAL_NODES_$(LOCAL_TOPOLOGY))

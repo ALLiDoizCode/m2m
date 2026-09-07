@@ -59,8 +59,9 @@ use connector_domain::NodeSelfDescription;
 /// Reported as [`SelfDescriptionError::Unreachable`] rather than as a
 /// scheme refusal, because that is what it is: the URL is perfectly legal
 /// and this node has no way to get there.
-const NO_SOCKS_PROXY: &str = "the URL's host ends in .onion and this node configured no \
-     socks_proxy, so there is nothing that can resolve or reach it (ADR 0070 decision 3)";
+const NO_SOCKS_PROXY: &str =
+    "the URL's host ends in .onion or .anyone and this node configured no socks_proxy, so there \
+     is nothing that can resolve or reach it (ADR 0070 decision 3)";
 
 /// The whole exchange's budget -- connect, headers and body together.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -77,12 +78,12 @@ pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 /// is no such check to fail (ADR 0058).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SelfDescriptionError {
-    /// The URL is not `https://`, is not at a `.onion` host, and this node
+    /// The URL is not `https://`, is not at a hidden-service host, and this node
     /// has not opted into plaintext peer endpoints. Trust-on-first-use over
     /// TLS is the whole of the assurance ADR 0058 offers, and there is none
     /// at all without either the TLS or the onion address that stands in
     /// for it (ADR 0070 decision 2).
-    #[error("a peer URL must be https, or http at a '.onion' host (got '{0}'); set peer_allow_plaintext_endpoints to rehearse over http elsewhere")]
+    #[error("a peer URL must be https, or http at a '.onion' or '.anyone' host (got '{0}'); set peer_allow_plaintext_endpoints to rehearse over http elsewhere")]
     InsecureScheme(String),
 
     /// The host could not be reached, or the exchange ran past
@@ -519,32 +520,48 @@ mod tests {
     /// proxy is configured, which is the distinction that matters to the
     /// operator reading it: the URL is legal and this node has no way to
     /// get there.
+    ///
+    /// Both spellings (issue #1284): a runtime peering is established from
+    /// whatever URL the counterparty's own daemon made it publish, and this
+    /// node has no say in which `anon` release that was.
     #[tokio::test]
     async fn an_onion_url_is_readable_without_the_plaintext_opt_in() {
-        let url =
-            Url::parse("http://vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion/ilp")
-                .expect("url");
+        for host in [
+            "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion",
+            "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.anyone",
+        ] {
+            let url = Url::parse(&format!("http://{host}/ilp")).expect("url");
 
-        let error = BoundedHttpSelfDescription::new(false, None)
-            .fetch(&url)
-            .await
-            .expect_err("no proxy is configured, so it cannot be reached");
+            let error = BoundedHttpSelfDescription::new(false, None)
+                .fetch(&url)
+                .await
+                .expect_err("no proxy is configured, so it cannot be reached");
 
-        match error {
-            SelfDescriptionError::Unreachable { reason, .. } => assert!(
-                reason.contains("socks_proxy"),
-                "the refusal has to name what is missing, got: {reason}"
-            ),
-            other => panic!("an onion URL is not an insecure scheme (ADR 0070): {other}"),
+            match error {
+                SelfDescriptionError::Unreachable { reason, .. } => assert!(
+                    reason.contains("socks_proxy"),
+                    "{host}: the refusal has to name what is missing, got: {reason}"
+                ),
+                other => {
+                    panic!("{host} is not an insecure scheme (ADR 0070): {other}")
+                }
+            }
         }
     }
 
-    /// And the suffix is a suffix. A host that merely contains `.onion`
-    /// without ending in it is an ordinary clearnet host, and `http://` at
-    /// one is refused exactly as it was before ADR 0070.
+    /// And the suffix is a suffix. A host that merely contains `.onion` or
+    /// `.anyone` without ending in it is an ordinary clearnet host, and
+    /// `http://` at one is refused exactly as it was before ADR 0070 --
+    /// including at the second spelling the rule gained in issue #1284,
+    /// which is the case a widening is most likely to have widened too far.
     #[tokio::test]
     async fn a_host_that_only_looks_onion_is_still_refused_as_plaintext() {
-        for host in ["onion.example", "notreally.onion.example"] {
+        for host in [
+            "onion.example",
+            "notreally.onion.example",
+            "anyone.example",
+            "notreally.anyone.example",
+        ] {
             let url = Url::parse(&format!("http://{host}/ilp")).expect("url");
 
             let error = BoundedHttpSelfDescription::new(false, None)

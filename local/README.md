@@ -69,12 +69,13 @@ nothing left to forward.
 
 ## Topologies
 
-| Topology                       | Nodes | What it proves                                                                                                                                                                                                                                                                                                                                                               |
-| ------------------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`solo/`](solo/)               | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route.                                                                                                                                                                                                                                  |
-| [`two-hop/`](two-hop/)         | 2     | Two images peered over ILP-over-HTTP. B **prices** the route it terminates; A covers each crossing before sending it, with a real EIP-712 claim on a real funded channel on the local anvil.                                                                                                                                                                                 |
-| [`mixed-chain/`](mixed-chain/) | 3     | A↔B settles on EVM **over BTP**, B↔C on Solana **over ILP-over-HTTP**, and B holds both backends. One packet crosses two chains _and_ two carriages — the only place a shipped image carries a packet over BTP at all — and B **enforces** on the arrival it forwards, the only place ADR 0042 item 3's enforcing path runs.                                                 |
-| [`onion/`](onion/)             | 2     | The peering rides a **real onion network**: B is reachable only at a `.onion` address its `anon` sidecar generates, and the two connectors are on separate docker networks with **no route between them**, so a direct dial is impossible rather than merely unobserved. The only topology where an endpoint's HOST decides how it is dialed (ADR 0070). Not on the CI gate. |
+| Topology                       | Nodes | What it proves                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------ | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`solo/`](solo/)               | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route.                                                                                                                                                                                                                                   |
+| [`two-hop/`](two-hop/)         | 2     | Two images peered over ILP-over-HTTP. B **prices** the route it terminates; A covers each crossing before sending it, with a real EIP-712 claim on a real funded channel on the local anvil.                                                                                                                                                                                  |
+| [`mixed-chain/`](mixed-chain/) | 3     | A↔B settles on EVM **over BTP**, B↔C on Solana **over ILP-over-HTTP**, and B holds both backends. One packet crosses two chains _and_ two carriages — the only place a shipped image carries a packet over BTP at all — and B **enforces** on the arrival it forwards, the only place ADR 0042 item 3's enforcing path runs.                                                  |
+| [`onion/`](onion/)             | 2     | The peering rides a **real onion network**: B is reachable only at a `.anyone` address its `anon` sidecar generates, and the two connectors are on separate docker networks with **no route between them**, so a direct dial is impossible rather than merely unobserved. The only topology where an endpoint's HOST decides how it is dialed (ADR 0070). Not on the CI gate. |
+| [`anyone/`](anyone/)           | 1     | The **client edge** over the same overlay, with the real payer: [`toon-client`](https://github.com/toon-protocol/toon-client) discovering, pricing and paying this node over a circuit. Needs that repository built, so it is run by its own `run.sh` rather than by `LOCAL_TOPOLOGY`. Not on the CI gate.                                                                    |
 
 `two_ledgers_never_merge.rs` is named for the both-chains concern and proves it
 in-process; `solo` is the only place a node is actually stood up with an EVM and
@@ -106,8 +107,8 @@ its own flat fee — 1200 sent, 1100 across the boundary, 1050 delivered.
 
 `onion` is the only place in this repository where an endpoint's **host**
 decides how it is dialed. B publishes no clearnet address at all: an `anon`
-sidecar generates a `.onion` address for it, A dials
-`ws://<addr>.onion/ilp/btp` through a SOCKS5 proxy on its own side, and the
+sidecar generates a hidden-service address for it, A dials
+`ws://<addr>.anyone/ilp/btp` through a SOCKS5 proxy on its own side, and the
 packet is paid for with an ordinary EIP-712 claim on an ordinary anvil
 channel. Nothing about the peering, the claim book or the money changes —
 which is ADR 0070's whole claim, stated as a deployment: an onion address is a
@@ -132,6 +133,21 @@ two carriage changes and the one a loopback SOCKS5 fake can least stand in for.
 The client edge rides the same onion service on the same port, because it is
 the same listener — one hidden service, both surfaces.
 
+### `.anyone`, and the daemon this builds
+
+The sidecar is **built here**, from [`local/anon-image/`](anon-image/), rather than
+pulled: `anon` renamed its hidden-service TLD between v0.4.9.7 (`.onion`) and v0.4.10.2
+(`.anyone`), ghcr publishes no image for the newer one, and the rename is total — neither
+release resolves the other's spelling (issue #1284). That Dockerfile overlays the official
+release binary, sha256-verified, onto the last published image, and both hidden-service
+topologies here use it.
+
+The connector accepts **both** suffixes — one rule, `is_onion_endpoint`, ADR 0070 as
+amended — so nothing under `crates/` turns on which daemon is running. What does turn on
+it is every address in this directory: the committed placeholders are spelled `.anyone`
+because that is what this sidecar writes, and `local_topologies_load.rs` holds the
+placeholder's TLD and the image's pinned version to one fact so the two cannot drift.
+
 ### The address does not exist until the daemon has run
 
 ADR 0070 decision 7: the daemon generates the address into its
@@ -143,7 +159,8 @@ That collides with the committed-config discipline the rest of this directory
 keeps, and the resolution is a **placeholder and a render**:
 
 - `local/onion/connector-a.toml` and `connector-b.toml` are committed with a
-  placeholder `.onion` host. A placeholder still ends in `.onion`, so the
+  placeholder `.anyone` host. A placeholder still ends in a hidden-service
+  suffix, so the
   committed files load through the real parser and stay meaningful to
   `local_topologies_load.rs` — which is the whole reason for committing a
   config rather than generating one.
@@ -173,6 +190,16 @@ container it fails fast rather than prompting. Both `local/onion/anonrc-a` and
 reason — the image's entrypoint appends one when it finds none, and these files
 are mounted read-only.
 
+A third trap of the same shape: `HiddenServicePort`'s target is resolved when the
+daemon **parses** its config, not when a stream arrives, so a container name that
+does not exist yet kills it — `Unparseable address in hidden service port
+configuration`, followed by an abort. That is unavoidable here, because the daemon
+has to start before the config naming its address can be rendered. `anonrc-b`
+therefore names a **fixed IP** and compose pins `connector-b` to it, held to one
+literal by `local_topologies_load.rs`.
+`docs/operators/onion-endpoint-bringup.md` carries the same warning for a real
+deployment.
+
 ### What is still dialed direct
 
 Settlement RPC and the app's `handler_url` (ADR 0070 decision 4). Both nodes
@@ -184,7 +211,7 @@ anonymity claim beyond that sentence.
 The one dial worth knowing about because it is easy to forget is the
 **claim-state ask**. A covering payer asks the payee where its claims stand on
 every covered PREPARE (issue #1102), so A's `[[pay_channels]]` row names B's
-onion client edge and that ask goes through the same proxy the carriage does —
+hidden-service client edge and that ask goes through the same proxy the carriage does —
 a hop reachable only over a circuit is not payable otherwise, and the packet
 would be refused for want of a covering claim long before the carriage was
 asked to carry it.
@@ -204,7 +231,7 @@ would say nothing about this repository, and the only sustainable responses to
 it are the two this rule exists to forbid: retry until green, or add a skip.
 
 The connector's own change is already on the gate and needs no network and no
-daemon. "Dial through SOCKS5" and "accept a `.onion` host as a valid endpoint"
+daemon. "Dial through SOCKS5" and "accept a hidden-service host as a valid endpoint"
 are both asserted in `cargo test` against a real SOCKS5 server on loopback —
 `Socks5TestServer`, in `connector-runtime`'s test support — and the dial is
 proved to have traversed it by the target the proxy recorded, not by a call

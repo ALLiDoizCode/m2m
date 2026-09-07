@@ -253,8 +253,9 @@ one carriage and not the other is a defect rather than a property of the carriag
 _Avoid_: peer wire, peer transport (when the layer is already clear)
 
 **Onion endpoint**:
-A published endpoint whose host is a `.onion` address — the node reachable over an onion-routing
-network rather than at a DNS name and an IP. Not a third **peer carriage** and not a transport: the
+A published endpoint whose host is a hidden-service address — `.onion` or `.anyone`, the two TLDs
+the `anon` daemon has published — the node reachable over an onion-routing network rather than at a
+DNS name and an IP. Not a third **peer carriage** and not a transport: the
 carriage is still BTP or ILP-over-HTTP, and an onion endpoint is where that carriage's bytes are
 _addressed_. Because a v3 onion address **is** the public key the circuit is authenticated to, such
 an endpoint carries its own authentication and needs no TLS — the one place the plaintext schemes
@@ -262,9 +263,12 @@ select a carriage, and a narrowing of ADR 0004's requirement by satisfying it ra
 Hides where a node is reachable, never who it pays: a claim names an on-chain channel and every
 operator write is signed under a keyid. Dialed through the one `socks_proxy` a node configures,
 selected by the endpoint's host and by nothing else — no per-peer key, no all-outbound mode
-([ADR 0070](docs/adr/0070-an-onion-address-is-a-host-not-a-carriage.md), built).
-_Avoid_: hidden service, onion transport, third transport, Anyone transport — and note that
-**transport** is already taken: a route's `transport` is the _client_ transport it accepts.
+([ADR 0070](docs/adr/0070-an-onion-address-is-a-host-not-a-carriage.md), built, amended by #1284).
+The word names the **mechanism**, never one TLD: `anon` renamed the suffix it publishes between
+releases, both spellings are accepted, and `is_onion_endpoint` is the one place that is decided.
+_Avoid_: hidden service, onion transport, third transport, Anyone transport, `.anyone` endpoint —
+and note that **transport** is already taken: a route's `transport` is the _client_ transport it
+accepts.
 
 **Interaction**:
 The unit a role attaches to: one BTP session, from its websocket upgrade to its close, or one

@@ -15,8 +15,38 @@ produced one.
 
 Modeled on [`btp-peer-transport-bringup.md`](btp-peer-transport-bringup.md)'s "Order" and "Gates"
 sections, which is where the peering surface itself is documented. Nothing here replaces it: an
-onion peering is an ordinary peering whose endpoint happens to have a `.onion` host, so every gate
+onion peering is an ordinary peering whose endpoint happens to have a hidden-service host, so every gate
 in that runbook still applies unchanged. What follows is only the difference.
+
+## Which TLD your daemon speaks — `.onion` or `.anyone`
+
+**Check this before anything else in this runbook.** `anon` renamed the TLD it publishes and routes
+between v0.4.9.7 and v0.4.10.2, and the rename is total in both directions
+([issue #1284](https://github.com/toon-protocol/connector/issues/1284)):
+
+| Release       | Writes into `hostname` | Routes    | Contains the other spelling      |
+| ------------- | ---------------------- | --------- | -------------------------------- |
+| **v0.4.9.7**  | `<56-base32>.onion`    | `.onion`  | no `.anyone` at all              |
+| **v0.4.10.2** | `<56-base32>.anyone`   | `.anyone` | **zero** occurrences of `.onion` |
+
+A daemon refuses the spelling it does not know — a `.onion` name offered to v0.4.10.2's SOCKS port
+comes back host-unreachable, and the reverse holds too. So the spelling is **the daemon's**, not
+yours: write down whatever `hostname` actually says.
+
+**The connector accepts both** (ADR 0070 as amended). One suffix rule, `is_onion_endpoint`, and it
+matches either — so a config is never wrong here for naming the TLD your own daemon generated. What
+it cannot do is bridge the two: a node published by one release is unreachable through the other's
+proxy, whatever any config says, because no circuit exists between them. **You and every
+counterparty you peer with must be on the same side of the rename**, and the check is one command on
+each box:
+
+```sh
+anon --version                                     # or: docker compose exec anon anon --version
+```
+
+`local/anon-image/` builds v0.4.10.2, which is the current release and the one `toon-client` pins;
+ghcr publishes no image for it, which is why that Dockerfile exists. The examples below are spelled
+`.anyone` for that reason; substitute `.onion` throughout if you are running the older daemon.
 
 ## No box on this fleet runs one
 
@@ -42,10 +72,10 @@ yours.
 An onion address is a **host**. It is not a scheme, not a carriage and not a transport. Both
 carriages ADR 0027 settled on ride it unchanged:
 
-| Carriage      | Clearnet endpoint        | Onion endpoint              |
-| ------------- | ------------------------ | --------------------------- |
-| BTP           | `wss://host:443/ilp/btp` | `ws://<addr>.onion/ilp/btp` |
-| ILP-over-HTTP | `https://host/ilp`       | `http://<addr>.onion/ilp`   |
+| Carriage      | Clearnet endpoint        | Onion endpoint               |
+| ------------- | ------------------------ | ---------------------------- |
+| BTP           | `wss://host:443/ilp/btp` | `ws://<addr>.anyone/ilp/btp` |
+| ILP-over-HTTP | `https://host/ilp`       | `http://<addr>.anyone/ilp`   |
 
 `peer_expose`, a route's `transport` policy, the greeting's `requiredTransport` and
 `peer-carriage-spec.md` §11's spellings are all untouched, and there is no `PeerCarriage::Onion` —
@@ -54,13 +84,13 @@ service as the peering, because it is the same listener: one hidden service, bot
 paths `client_edge_addr` already serves.
 
 **The plaintext schemes here need no opt-in.** `ws://` and `http://` select a carriage at a host
-ending in `.onion` on their own, independently of `peer_allow_plaintext_endpoints`, which keeps its
+ending in `.onion` or `.anyone` on their own, independently of `peer_allow_plaintext_endpoints`, which keeps its
 existing meaning and its existing scope as a loopback-and-test switch that must never be set on a
 deployed node. The exemption is narrow on purpose: a v3 onion address **is** the ed25519 public key
 the circuit is authenticated to, so an endpoint at that host authenticates itself, and ADR 0004's
 requirement is satisfied by a different mechanism rather than waived. A host that merely _contains_
-`.onion` — `onion.example`, `notreally.onion.example` — is still refused as plaintext, by name
-(`ConfigError::PeerEndpointScheme`).
+either suffix — `onion.example`, `notreally.onion.example`, `anyone.example` — is still refused as
+plaintext, by name (`ConfigError::PeerEndpointScheme`): these are suffixes, not substrings.
 
 ## Who does what
 
@@ -88,8 +118,9 @@ decision 7), not a gap — see "The operator writes the address down", below.
   authentication — the circuit authenticates the endpoint, never the peer.
 - An onion-routing daemon available to run **beside** the connector, not inside it. Anyone
   Protocol's `anon` is a Tor fork — binary `anon`, config `anonrc`, SOCKS on 9050 — and plain Tor
-  works identically: the connector's whole surface is a `socks5h://` URL and a `.onion` host, and
-  nothing in it is specific to either.
+  works identically: the connector's whole surface is a `socks5h://` URL and a hidden-service
+  host, and nothing in it is specific to either. Which `anon` release you run decides the TLD —
+  see the section above.
 - A settlement RPC endpoint and an app `handler_url` the node can reach **directly**. Neither is
   proxied (below), so an onion endpoint does not relieve the box of ordinary outbound network
   access.
@@ -126,6 +157,27 @@ needs an explicit `Nickname`, because the image's entrypoint appends one when it
 cannot write to a read-only file; and a container that is `Up` is not a container that has a
 circuit, so gate on `Bootstrapped 100%` in the log rather than on the container's state.
 
+### 2b. `HiddenServicePort`'s target is resolved when the config is **parsed**
+
+`anon` resolves the address in `HiddenServicePort` while reading its `anonrc`, not when a stream
+arrives. A target it cannot resolve **aborts the daemon before it runs**, and it aborts by crashing:
+
+```
+[warn] Unparseable address in hidden service port configuration.
+free(): invalid size
+```
+
+That bites exactly where this runbook puts you. The connector's config names an address only the
+daemon can generate, so the daemon has to start first — and if `HiddenServicePort` names the
+connector by a container name that does not exist yet, the daemon dies on the name rather than
+waiting for it. Point it at something that resolves at parse time: a **fixed IP** on the container
+network (`local/anyone/anonrc-b` does this, and its compose pins the connector to that address), or
+a host that is already up.
+
+Belongs beside `AgreeToTerms 1` in your head: both are configuration faults that kill the daemon
+before it can say anything useful about itself, leaving a connector beside it that looks healthy and
+is unreachable.
+
 ### 3. `HiddenServiceDir` must be on a persisted volume — the same rule as `state_dir`
 
 **This is the failure that costs the most and announces itself the least.** The daemon generates the
@@ -156,9 +208,10 @@ onion key in a repository is an address anyone who cloned it can impersonate, an
 docker compose exec -T anon cat /var/lib/anon/hidden_service/hostname
 ```
 
-A v3 address is 56 characters of the base32 alphabet followed by `.onion`. Anything shorter, or an
-empty file, means the daemon has not finished publishing its descriptor yet — wait for
-`Bootstrapped 100%` and read again.
+A v3 address is 56 characters of the base32 alphabet followed by the TLD **that daemon** speaks —
+`.anyone` on v0.4.10.2, `.onion` on v0.4.9.7 (see "Which TLD your daemon speaks" above). Anything
+shorter, or an empty file, means the daemon has not finished publishing its descriptor yet — wait
+for `Bootstrapped 100%` and read again. Copy what the file says; do not translate it.
 
 ### 5. The operator writes the address down
 
@@ -166,7 +219,7 @@ The connector **never reads that file** and **never speaks the daemon's control 
 decision 7). It is ADR 0050's shape exactly — a fact no process can introspect about itself — and it
 is the same reason `[node]` exists at all. Copy the address into two places, by hand:
 
-**On the onion node**, into `[node]`. No new key: a `.onion` URL is a legal value for the
+**On the onion node**, into `[node]`. No new key: a hidden-service URL is a legal value for the
 `http_endpoint` and `btp_endpoint` this section already has (decision 6), and issue #1220's rule
 holds unmodified — `btp_endpoint` is required exactly when `peer_expose` opens a BTP listener, and
 `http_endpoint` whenever anything is exposed, because a peer pays this node by asking its client
@@ -175,8 +228,8 @@ edge for claim-state over HTTP whichever carriage a packet rides.
 ```toml
 [node]
 addresses     = ["g.example.onionnode"]
-http_endpoint = "http://<56-char-address>.onion/ilp"
-btp_endpoint  = "ws://<56-char-address>.onion/ilp/btp"
+http_endpoint = "http://<56-char-address>.anyone/ilp"
+btp_endpoint  = "ws://<56-char-address>.anyone/ilp/btp"
 ```
 
 **On the dialing node**, into the peer's `endpoint` — and into the `[[pay_channels]]` row's
@@ -194,14 +247,14 @@ socks_proxy = "socks5h://anon:9050"
 
 The `h` is not a preference and is refused by name without it (`ConfigError::SocksProxyScheme`): a
 `socks5://` proxy resolves the hostname **locally** and dials the address it gets back, and no local
-resolver resolves a `.onion` name. A node that accepted one would come up clean and then fail every
+resolver resolves a hidden-service name. A node that accepted one would come up clean and then fail every
 onion dial at dial time, for a reason nothing in its log explains. A value that parses but names no
 host — `socks5h://`, or a `socks5h:9050` that looks like a `host:port` and is not one — is refused
 the same way (`ConfigError::SocksProxyNoHost`), because `socks5h` is not a _special_ URL scheme and
 both of those parse.
 
 **There is nothing else to configure, and that is deliberate.** Which dials use the proxy is read
-off each endpoint's own **host**: a host ending in `.onion` goes through the proxy, everything else
+off each endpoint's own **host**: a host ending in `.onion` or `.anyone` goes through the proxy, everything else
 goes direct. There is no per-peer `proxy` key and no all-outbound mode, because the address already
 carries the answer and a second place to state it is how a peering ends up dialed the wrong way.
 One rule, one implementation (`connector_config::is_onion_endpoint`), asked in four places:
@@ -214,11 +267,11 @@ One rule, one implementation (`connector_config::is_onion_endpoint`), asked in f
 ```toml
 [[peers]]
 id       = "onionpeer"
-endpoint = "ws://<56-char-address>.onion/ilp/btp"   # or http://…/ilp for ILP-over-HTTP
+endpoint = "ws://<56-char-address>.anyone/ilp/btp"  # or http://…/ilp for ILP-over-HTTP
 
 [[pay_channels]]
 peer_id         = "onionpeer"
-client_edge_url = "http://<56-char-address>.onion/ilp"
+client_edge_url = "http://<56-char-address>.anyone/ilp"
 # channel_id, chain_id and token_network as they would be on any peering
 ```
 
@@ -238,8 +291,8 @@ endpoint, and `POST /peers` at an onion URL is refused before any request is mad
 
 ```sh
 connector send --socks-proxy socks5h://127.0.0.1:9050 \
-  --operator http://<addr>.onion/ilp \
-  --seal-to  http://<addr>.onion/ilp \
+  --operator http://<addr>.anyone/ilp \
+  --seal-to  http://<addr>.anyone/ilp \
   --expect-fulfill …
 ```
 
@@ -297,7 +350,7 @@ paragraph refuses.
 
 ## An onion node is invisible to the clearnet fleet
 
-Its `GET /ilp` publishes a `.onion` URL, and a peer without a proxy cannot dial it. **This is
+Its `GET /ilp` publishes a hidden-service URL, and a peer without a proxy cannot dial it. **This is
 expected, not a defect.** `CONTEXT.md` already holds that reachability is the only registry — there
 is no directory a node is missing from — but the statement here is stronger than "unreachable
 today": the existing devnet boxes cannot reach such a node **at all**, because neither of them
@@ -319,7 +372,7 @@ exactly the NAT'd operator it was before this runbook). Restart.
 
 **On the dialing node**, point the peer's `endpoint` and the `[[pay_channels]]` row's
 `client_edge_url` back at a clearnet URL, or drop the peering rows. `socks_proxy` may be left in
-place: with no `.onion` endpoint in the file it selects nothing, and a proxy that nothing dials
+place: with no hidden-service endpoint in the file it selects nothing, and a proxy that nothing dials
 through costs nothing.
 
 Neither rollback touches the daemon, the volume or the address. Leaving the sidecar running with its

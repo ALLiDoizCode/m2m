@@ -15,9 +15,18 @@
 //! certificate for a DNS name, since no third party attests it and there is
 //! no issuer to mis-issue. ADR 0004's requirement that a peering's wire be
 //! authenticated is therefore satisfied by a different mechanism rather than
-//! waived, which is why the rule keys on the `.onion` suffix and on nothing
+//! waived, which is why the rule keys on the host suffix and on nothing
 //! else, and why it leaves `peer_allow_plaintext_endpoints` -- a test
 //! affordance, not a deployment shape -- exactly where it was.
+//!
+//! **Two spellings, one rule** (issue #1284). `anon` renamed the TLD it
+//! publishes and routes between v0.4.9.7 (`.onion`) and v0.4.10.2
+//! (`.anyone`), and the rename is total in both directions -- neither daemon
+//! resolves the other's spelling. Both suffixes are accepted here because
+//! the argument above is about the ADDRESS: either spelling is the base32
+//! ed25519 key the circuit is authenticated to. So every case below that
+//! turns on the suffix is asserted at both, and a rule that held at one and
+//! not the other would be a node that loads an endpoint it cannot dial.
 //!
 //! This file lives in `connector-runtime` because two of the four call sites
 //! that must read the one answer are here: `RuntimePeering::dial`, and the
@@ -38,6 +47,16 @@ use connector_runtime::RuntimePeering;
 /// `hostname` file.
 const ONION: &str = "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.onion";
 
+/// The same 56 characters under the TLD `anon` v0.4.10.2 writes into
+/// `HiddenServiceDir/hostname` (issue #1284). Deliberately the same key in
+/// both constants: what changed upstream is how the address is SPELLED, not
+/// what it is, and a fixture that changed both at once would let a rule that
+/// keys on the wrong half still pass.
+const ANYONE: &str = "vww6ybal4bd7szmgncyruucpgfkqahzddi37ktceo3ah7ngmcopnpyyd.anyone";
+
+/// Both spellings, for the cases whose whole subject is the suffix.
+const HIDDEN_SERVICE_HOSTS: [&str; 2] = [ONION, ANYONE];
+
 const CHANNEL: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const OTHER_CHANNEL: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
 const KEY: &str = "0x2222222222222222222222222222222222222222";
@@ -48,6 +67,13 @@ const TOKEN_NETWORK: &str = "0x3333333333333333333333333333333333333333";
 /// the whole point: the plaintext schemes select here because of the host
 /// and for no other reason.
 fn onion_peers(key_path: &Path, state_dir: &Path) -> String {
+    onion_peers_at(ONION, key_path, state_dir)
+}
+
+/// The same fixture at whichever spelling of a hidden-service host is under
+/// test. Every caller that does not name one gets `.onion`, so the cases
+/// this file already had read exactly as they did.
+fn onion_peers_at(host: &str, key_path: &Path, state_dir: &Path) -> String {
     format!(
         r#"
 client_edge_addr = "127.0.0.1:3000"
@@ -58,11 +84,11 @@ key_file = "{key_file}"
 
 [[peers]]
 id = "onion-btp"
-endpoint = "ws://{ONION}/btp"
+endpoint = "ws://{host}/btp"
 
 [[peers]]
 id = "onion-http"
-endpoint = "http://{ONION}/ilp"
+endpoint = "http://{host}/ilp"
 
 [[peer_channels]]
 peer_id = "onion-btp"
@@ -119,19 +145,35 @@ fn dial_of(config: &Config, peer_id: &str) -> Option<PeerCarriage> {
         .dial()
 }
 
-/// Decision 2, both halves at once: `ws://` at a `.onion` host selects BTP
-/// and `http://` at one selects ILP-over-HTTP, on a node that opted into
+/// Decision 2, both halves at once: `ws://` at a hidden-service host selects
+/// BTP and `http://` at one selects ILP-over-HTTP, on a node that opted into
 /// nothing.
+///
+/// Run at both spellings (issue #1284). A node peering with a v0.4.10.2
+/// daemon writes `.anyone` in exactly the place a node peering with a
+/// v0.4.9.7 one writes `.onion`, and the exemption is the address's to earn
+/// either way.
 #[test]
 fn an_onion_host_selects_both_carriages_without_the_plaintext_opt_in() {
-    let config = load(onion_peers).expect("an onion endpoint loads");
+    for host in HIDDEN_SERVICE_HOSTS {
+        let config = load(|key_file, state_dir| onion_peers_at(host, key_file, state_dir))
+            .unwrap_or_else(|error| panic!("an endpoint at {host} loads: {error}"));
 
-    assert!(
-        !config.peer_allow_plaintext_endpoints(),
-        "the fixture must not set the opt-in, or it proves nothing about the host rule"
-    );
-    assert_eq!(dial_of(&config, "onion-btp"), Some(PeerCarriage::Btp));
-    assert_eq!(dial_of(&config, "onion-http"), Some(PeerCarriage::Http));
+        assert!(
+            !config.peer_allow_plaintext_endpoints(),
+            "the fixture must not set the opt-in, or it proves nothing about the host rule"
+        );
+        assert_eq!(
+            dial_of(&config, "onion-btp"),
+            Some(PeerCarriage::Btp),
+            "ws://{host} selects BTP"
+        );
+        assert_eq!(
+            dial_of(&config, "onion-http"),
+            Some(PeerCarriage::Http),
+            "http://{host} selects ILP-over-HTTP"
+        );
+    }
 }
 
 /// Decision 1: the set stays two-valued. Whatever an onion peering resolves
@@ -166,9 +208,13 @@ fn a_plaintext_scheme_at_any_other_host_is_still_refused() {
         "http://peer.example/ilp",
         // The suffix is a suffix, not a substring: a host that merely
         // contains the word, or names it as a label that is not the last
-        // one, is an ordinary clearnet host.
+        // one, is an ordinary clearnet host. Both spellings, because
+        // widening the rule to a second TLD (issue #1284) is exactly the
+        // change that could widen it to a second SHAPE by accident.
         "http://onion.example/ilp",
         "http://notreally.onion.example/ilp",
+        "http://anyone.example/ilp",
+        "http://notreally.anyone.example/ilp",
     ] {
         let error = load(|key_file, state_dir| {
             onion_peers(key_file, state_dir).replace(&format!("http://{ONION}/ilp"), endpoint)
@@ -252,20 +298,22 @@ fn the_plaintext_opt_in_still_means_exactly_what_it_meant() {
 /// own text ("peer_allow_plaintext_endpoints is set...") is false about it.
 #[test]
 fn an_onion_peering_is_not_named_as_a_peering_in_the_clear() {
-    let config = load(|key_file, state_dir| {
-        onion_peers(key_file, state_dir).replace(
-            "client_edge_addr = \"127.0.0.1:3000\"",
-            "client_edge_addr = \"127.0.0.1:3000\"\npeer_allow_plaintext_endpoints = true",
-        )
-    })
-    .expect("load");
+    for host in HIDDEN_SERVICE_HOSTS {
+        let config = load(|key_file, state_dir| {
+            onion_peers_at(host, key_file, state_dir).replace(
+                "client_edge_addr = \"127.0.0.1:3000\"",
+                "client_edge_addr = \"127.0.0.1:3000\"\npeer_allow_plaintext_endpoints = true",
+            )
+        })
+        .unwrap_or_else(|error| panic!("an endpoint at {host} loads: {error}"));
 
-    assert!(config.peer_allow_plaintext_endpoints());
-    assert_eq!(
-        config.plaintext_peerings().count(),
-        0,
-        "the circuit is encrypted and authenticated to the key the address is"
-    );
+        assert!(config.peer_allow_plaintext_endpoints());
+        assert_eq!(
+            config.plaintext_peerings().count(),
+            0,
+            "{host}: the circuit is encrypted and authenticated to the key the address is"
+        );
+    }
 }
 
 /// Decision 6, first half: a `.onion` URL is a legal value for the existing
@@ -273,28 +321,32 @@ fn an_onion_peering_is_not_named_as_a_peering_in_the_clear() {
 /// and not a schema -- there is no second key per carriage.
 #[test]
 fn an_onion_url_is_accepted_in_both_node_endpoint_keys() {
-    let config = load(|key_file, state_dir| {
-        format!(
-            "{}\n[node]\naddresses = [\"g.toon.onion-node\"]\n\
-             http_endpoint = \"http://{ONION}/ilp\"\n\
-             btp_endpoint = \"ws://{ONION}/ilp/btp\"\n",
-            onion_peers(key_file, state_dir).replace(
-                "client_edge_addr = \"127.0.0.1:3000\"",
-                "client_edge_addr = \"127.0.0.1:3000\"\npeer_expose = \"both\""
-            ),
-        )
-    })
-    .expect("an onion-only node describes itself with onion endpoints");
+    for host in HIDDEN_SERVICE_HOSTS {
+        let config = load(|key_file, state_dir| {
+            format!(
+                "{}\n[node]\naddresses = [\"g.toon.onion-node\"]\n\
+                 http_endpoint = \"http://{host}/ilp\"\n\
+                 btp_endpoint = \"ws://{host}/ilp/btp\"\n",
+                onion_peers_at(host, key_file, state_dir).replace(
+                    "client_edge_addr = \"127.0.0.1:3000\"",
+                    "client_edge_addr = \"127.0.0.1:3000\"\npeer_expose = \"both\""
+                ),
+            )
+        })
+        .unwrap_or_else(|error| {
+            panic!("a node at {host} describes itself with its own endpoints: {error}")
+        });
 
-    let node = config.node().expect("[node]");
-    assert_eq!(
-        node.http_endpoint(),
-        Some(format!("http://{ONION}/ilp").as_str())
-    );
-    assert_eq!(
-        node.btp_endpoint(),
-        Some(format!("ws://{ONION}/ilp/btp").as_str())
-    );
+        let node = config.node().expect("[node]");
+        assert_eq!(
+            node.http_endpoint(),
+            Some(format!("http://{host}/ilp").as_str())
+        );
+        assert_eq!(
+            node.btp_endpoint(),
+            Some(format!("ws://{host}/ilp/btp").as_str())
+        );
+    }
 }
 
 /// Decision 6, second half: issue #1220's rule is unmodified. An endpoint is
@@ -334,26 +386,74 @@ fn an_exposed_listener_still_requires_an_endpoint_on_an_onion_node() {
 /// they diverge to.
 #[test]
 fn a_runtime_peering_decides_an_onion_endpoint_identically() {
-    let config = load(onion_peers).expect("load");
+    for host in HIDDEN_SERVICE_HOSTS {
+        let config = load(|key_file, state_dir| onion_peers_at(host, key_file, state_dir))
+            .unwrap_or_else(|error| panic!("an endpoint at {host} loads: {error}"));
 
-    for (peer_id, endpoint) in [
-        ("onion-btp", format!("ws://{ONION}/btp")),
-        ("onion-http", format!("http://{ONION}/ilp")),
-    ] {
-        let runtime = RuntimePeering {
-            endpoint: Some(endpoint.clone()),
-            ..RuntimePeering::default()
-        };
+        for (peer_id, endpoint) in [
+            ("onion-btp", format!("ws://{host}/btp")),
+            ("onion-http", format!("http://{host}/ilp")),
+        ] {
+            let runtime = RuntimePeering {
+                endpoint: Some(endpoint.clone()),
+                ..RuntimePeering::default()
+            };
 
-        assert_eq!(
-            runtime.dial(false),
-            dial_of(&config, peer_id),
-            "{endpoint} must decide the same carriage from a runtime row as from the config file"
-        );
-        assert_eq!(
-            runtime.dial(false),
-            runtime.dial(true),
-            "and independently of the plaintext opt-in, on both paths"
-        );
+            assert_eq!(
+                runtime.dial(false),
+                dial_of(&config, peer_id),
+                "{endpoint} must decide the same carriage from a runtime row as from the \
+                 config file"
+            );
+            assert_eq!(
+                runtime.dial(false),
+                runtime.dial(true),
+                "and independently of the plaintext opt-in, on both paths"
+            );
+        }
     }
+}
+
+/// **The rename is a spelling, and this is the test that says so** (issue
+/// #1284).
+///
+/// `anon` v0.4.9.7 publishes and routes `.onion`; v0.4.10.2 publishes and
+/// routes `.anyone` and contains no occurrence of the older TLD at all.
+/// Neither daemon resolves the other's spelling, so a connector that knew
+/// only one of them could load an address its own operator's daemon had
+/// just written and refuse it -- which is what this repository did until
+/// this test existed.
+///
+/// The two answers are compared to **each other** rather than each to a
+/// constant, for the reason the runtime-peering case above is written that
+/// way: this fails if the spellings ever diverge, whatever they diverge to.
+/// What it deliberately does not assert is that a `.onion` address is
+/// reachable from a `.anyone` daemon -- it is not, and that is the sidecar's
+/// business rather than the connector's. This node accepts both because it
+/// dials whichever one its own operator's daemon speaks.
+#[test]
+fn both_spellings_of_a_hidden_service_host_decide_identically() {
+    let by_spelling: Vec<Vec<(String, Option<PeerCarriage>)>> = HIDDEN_SERVICE_HOSTS
+        .iter()
+        .map(|host| {
+            let config = load(|key_file, state_dir| onion_peers_at(host, key_file, state_dir))
+                .unwrap_or_else(|error| panic!("an endpoint at {host} loads: {error}"));
+            config
+                .peers()
+                .iter()
+                .map(|peer| (peer.id().to_string(), peer.dial()))
+                .collect()
+        })
+        .collect();
+
+    assert_eq!(
+        by_spelling[0], by_spelling[1],
+        "the same 56-character key under the two TLDs `anon` has published must select the same \
+         carriage for the same peering. One spelling accepted and the other refused is an \
+         operator whose node will not dial the address their own daemon generated."
+    );
+    assert!(
+        by_spelling[0].iter().all(|(_, dial)| dial.is_some()),
+        "and it must be a carriage rather than None at both -- two refusals are also 'identical'"
+    );
 }

@@ -1,11 +1,11 @@
 # =============================================================================
-# local/onion -- connector B, the node that is reachable ONLY at a .onion
-# address.
+# local/onion -- connector B, the node that is reachable ONLY at a
+# hidden-service address.
 #
 # LOCAL / DEV ONLY. `infra/linode-*` owns devnet; nothing here is deployed,
 # published or SSH'd anywhere, and every chain this file names is disposable.
 #
-# THE .onion HOST BELOW IS A PLACEHOLDER, and it is committed as one on
+# THE .anyone HOST BELOW IS A PLACEHOLDER, and it is committed as one on
 # purpose (ADR 0070 decision 7). The `anon` daemon generates the real address
 # into its `HiddenServiceDir/hostname` the first time it runs, and the OPERATOR
 # copies it into `[node]` and into the dialing node's peer `endpoint`. The
@@ -13,9 +13,15 @@
 # protocol. `local/keys.sh onion` plays the operator here: it starts the
 # sidecar, reads the address, and renders this file with the address
 # substituted into `local/.keys/onion/connector-b/connector.toml`, which is
-# what compose actually mounts. A placeholder still ENDS IN `.onion`, so this
+# what compose actually mounts. A placeholder still ENDS IN `.anyone`, so this
 # committed file loads through the real parser and stays worth committing --
 # `local_topologies_load.rs` reads exactly these bytes.
+#
+# `.anyone` is the TLD the daemon `local/anon-image` pins actually writes:
+# `anon` renamed it, and this repository was on the older side of that rename
+# until issue #1284. The connector accepts `.onion` too -- one suffix rule,
+# `is_onion_endpoint` -- so a node still running the older daemon peers
+# unchanged.
 #
 # WHAT THIS NODE HAS THAT NO OTHER NODE UNDER local/ HAS: no clearnet address
 # at all. It sits on its own docker network with no route to the node that
@@ -96,8 +102,8 @@ token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
 # and the two endpoints it is reachable at. THE ADDRESSES BELOW ARE THE
 # PLACEHOLDER; `local/keys.sh onion` substitutes the daemon's real one.
 #
-# NO NEW KEY (ADR 0070 decision 6): a `.onion` URL is a legal value for the
-# `http_endpoint` and `btp_endpoint` this section already had, and issue
+# NO NEW KEY (ADR 0070 decision 6): a hidden-service URL is a legal value for
+# the `http_endpoint` and `btp_endpoint` this section already had, and issue
 # #1220's rule holds unmodified -- `btp_endpoint` is required exactly because
 # `peer_expose` opens a BTP peer listener, and `http_endpoint` is required
 # whenever any carriage is exposed, because a peer covering a forward to this
@@ -111,8 +117,8 @@ token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
 # different mechanism rather than waived (ADR 0070 decision 2).
 [node]
 addresses = ["g.local.onion.b"]
-http_endpoint = "http://placeholderplaceholderplaceholderplaceholderplaceholderb.onion/ilp"
-btp_endpoint = "ws://placeholderplaceholderplaceholderplaceholderplaceholderb.onion/ilp/btp"
+http_endpoint = "http://placeholderplaceholderplaceholderplaceholderplaceholderb.anyone/ilp"
+btp_endpoint = "ws://placeholderplaceholderplaceholderplaceholderplaceholderb.anyone/ilp/btp"
 
 # No `[operator]` section, deliberately (CF-31): an absent table means the
 # surface is not started at all. Nothing sends to this node directly -- the

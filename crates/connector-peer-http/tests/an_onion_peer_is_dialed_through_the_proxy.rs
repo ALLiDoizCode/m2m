@@ -61,6 +61,21 @@ fn onion_endpoint() -> Url {
     Url::parse(&format!("http://{ONION_HOST}/ilp")).expect("an onion endpoint is a URL")
 }
 
+/// The same address as `anon` v0.4.10.2 writes it (issue #1284). The daemon
+/// renamed the TLD it publishes and routes, and neither release resolves the
+/// other's spelling -- so a client that selected the proxy for one and not
+/// the other would dial an operator's own peer direct, at a name nothing on
+/// this machine can resolve.
+const ANYONE_HOST: &str = "toonexampleconnectoraddress234567abcdefghijklmnopqrstuvw.anyone";
+
+fn anyone_target() -> String {
+    format!("{ANYONE_HOST}:80")
+}
+
+fn anyone_endpoint() -> Url {
+    Url::parse(&format!("http://{ANYONE_HOST}/ilp")).expect("an anyone endpoint is a URL")
+}
+
 /// A PREPARE-shaped request body plus one §3 header, so what arrives at the
 /// far end is recognisable as this carriage's POST rather than as any byte
 /// this test happened to write.
@@ -243,13 +258,16 @@ async fn a_clearnet_endpoint_on_the_same_node_never_traverses_the_proxy() {
     assert_eq!(answered.status, 200);
     assert_eq!(answered.body, PONG);
 
-    // The same client, one endpoint later.
+    // The same client, two endpoints later -- one per spelling the daemon
+    // has published (issue #1284).
     let _ = client.post(&onion_endpoint(), request()).await;
+    let _ = client.post(&anyone_endpoint(), request()).await;
 
     assert_eq!(
         proxy.targets(),
-        vec![onion_target()],
-        "only the onion endpoint traversed the proxy; the clearnet one was never offered to it"
+        vec![onion_target(), anyone_target()],
+        "both hidden-service endpoints traversed the proxy, in the order they were dialed, and \
+         the clearnet one was never offered to it"
     );
     let clearnet_addr = clearnet.addr().to_string();
     assert!(

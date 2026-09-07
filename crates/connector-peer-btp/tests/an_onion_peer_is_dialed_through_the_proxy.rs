@@ -68,6 +68,21 @@ fn onion_endpoint() -> Url {
     Url::parse(&format!("ws://{ONION_HOST}/btp")).expect("an onion endpoint is a URL")
 }
 
+/// The same address as `anon` v0.4.10.2 writes it (issue #1284). The daemon
+/// renamed the TLD it publishes and routes, and neither release resolves the
+/// other's spelling -- so a dialer that selected the proxy for one and not
+/// the other would dial an operator's own peer direct, at a name nothing on
+/// this machine can resolve.
+const ANYONE_HOST: &str = "toonexampleconnectoraddress234567abcdefghijklmnopqrstuvw.anyone";
+
+fn anyone_target() -> String {
+    format!("{ANYONE_HOST}:80")
+}
+
+fn anyone_endpoint() -> Url {
+    Url::parse(&format!("ws://{ANYONE_HOST}/btp")).expect("an anyone endpoint is a URL")
+}
+
 /// The ILP-packet bytes the MESSAGE below carries. Not a real OER packet:
 /// what this file asserts is that the *frame* crossed intact and correlated,
 /// and `encode_message`/`decode_frame` are the same codec either way (the
@@ -244,13 +259,16 @@ async fn a_clearnet_endpoint_on_the_same_dialer_never_traverses_the_proxy() {
         .expect("and the session over it carries a frame");
     assert_eq!(answer.ilp_packet, PACKET);
 
-    // The same dialer, one endpoint later.
+    // The same dialer, two endpoints later -- one per spelling the daemon
+    // has published (issue #1284).
     let _ = dialer.dial("onion-peer", &onion_endpoint()).await;
+    let _ = dialer.dial("anyone-peer", &anyone_endpoint()).await;
 
     assert_eq!(
         proxy.targets(),
-        vec![onion_target()],
-        "only the onion endpoint traversed the proxy; the clearnet one was never offered to it"
+        vec![onion_target(), anyone_target()],
+        "both hidden-service endpoints traversed the proxy, in the order they were dialed, and \
+         the clearnet one was never offered to it"
     );
     let clearnet_addr = clearnet.addr().to_string();
     assert!(
